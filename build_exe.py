@@ -444,7 +444,8 @@ OFFICIAL_SIGNATURE_PIN = "PINNED-OFFICIAL-GPG-SIGNATURE"
 # 即在**下载之前** SystemExit（不浪费 300MB 带宽，也不落盘未校验产物）。
 # 维护方式（每次升级运行时版本都要走一遍）：
 #   1) 从官方渠道取该构建公布的 SHA256：nodejs.org 的 SHASUMS256.txt、gyan.dev 的 <name>.zip.sha256、
-#      BtbN 资产则取 api.github.com 的 releases/latest → assets[].digest（形如 "sha256:<64hex>"）；
+#      BtbN 资产则取 api.github.com 的 releases/tags/<钉定标签> → assets[].digest（形如 "sha256:<64hex>"）；
+#      [2026-09-27] 不要用 releases/latest：那是滚动别名，digest 每次上游重传都变，取完当天就可能失配。
 #      三条取数命令与读数时刻记在 docs/agent-reference/measured-evidence.md 对应小节。
 #   2) 把 64 位十六进制小写值替换下表中的 UNVERIFIED_PIN（**不得凭本地下载结果填写**——
 #      那只会把「构建机已中毒」的情形固化成基线）；上游确实只给签名不给哈希时，改填
@@ -476,6 +477,11 @@ OFFICIAL_SIGNATURE_PIN = "PINNED-OFFICIAL-GPG-SIGNATURE"
 #   · linux-x64 / linux-arm64 的 ffmpeg 已换用**公布 SHA256 的上游**（BtbN FFmpeg-Builds 的 n9.0 系列
 #     资产，2026-09-26）：下表取值取自 api.github.com 该 release asset 的 digest 字段——属平台公布的哈希
 #     文档，不是本地下载自算，故仍是常规 64 位十六进制钉定，不需要新开完整性档。
+#     [2026-09-27 更正] 取数端点由 `releases/latest` 改为 `releases/tags/<标签>`，且标签必须是**月末**
+#     autobuild（现钉 autobuild-2026-08-31-13-27）：`latest` 是滚动别名，上游每次重建即换 digest——
+#     实测 2026-09-26 当天取的 87de0900… 在同日 13:22 上游重发后即失配，发布链当次即红；日更
+#     autobuild 标签又只保留约两周（实测仅剩 09-13~09-26 共 15 条），钉它会变成两周后必然 404。
+#     月末标签实测可回溯到 autobuild-2024-10-31，是本仓能拿到的唯一「URL 与 digest 都不可变」的组合。
 #   [历史注] 2026-09-22 至 2026-09-26 这四槽长期保持占位，原因是当时所选上游确实不公布 SHA256：
 #     johnvansickle（Linux）只提供 *.md5（实测 200，内容为 md5 摘要）。按「不得凭本地下载结果填写」的
 #     硬约束宁可让发布链红在这些槽位上。Linux 侧最终处置选了「换用公布 SHA256 的上游」，而不是为
@@ -492,14 +498,15 @@ _PINNED_RUNTIME_SHA256: dict[str, dict[str, str]] = {
         "node": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
     },
     "linux-x64": {
-        # BtbN ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz（api.github.com assets[].digest，2026-09-26）
-        "ffmpeg": "87de09009b85f61d452f5edcc702885c2ac7cb5f2016b30bd273b454df87eb9a",
+        # BtbN autobuild-2026-08-31-13-27 的 ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz
+        # （api.github.com releases/tags/<标签> → assets[].digest，2026-09-27）
+        "ffmpeg": "182c1b509720e939bb47bfb47dc29cc0c298640401128e3dce8627d10707eb5a",
         # node-v24.21.0-linux-x64.tar.gz
         "node": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff",
     },
     "linux-arm64": {
-        # BtbN ffmpeg-n9.0-latest-linuxarm64-gpl-9.0.tar.xz（同上取值方式，2026-09-26）
-        "ffmpeg": "30774c8ff65512d1700c4d552d4bfed30a9924576b38aab8e4deb9c744597d61",
+        # 同一标签的 linuxarm64 资产；与上一条同一次取数（2026-09-27）
+        "ffmpeg": "e2dd447c8a47849c5812d87e54a47b20ae0f3603d38989440f4a5fe1af8755b1",
         # node-v24.21.0-linux-arm64.tar.gz
         "node": "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5",
     },
@@ -973,11 +980,17 @@ def _download_nodejs(target_dir: Path) -> bool:
 #             Homebrew 前缀下的**其他 formulae**、不在 bottle tarball 内，直接打进分发包只会得到
 #             `dyld: Library not loaded` 的坏产物。
 #   linux   → BtbN FFmpeg-Builds 的 **n9.0 系列**资产（2026-09-26 换源）：选该上游是因为它有一份
-#             **可人工核对的公布哈希**——api.github.com 的 `releases/latest` 里每个 asset 带
-#             `digest: sha256:<64hex>`，取值即按此填入 _PINNED_RUNTIME_SHA256（属平台公布的哈希文档，
-#             不是本地下载自算）。版本对齐：gyan/evermeet 当前均为 ffmpeg 9.0.x，故取 `-gpl-9.0` 系列
-#             而不是 master 滚动构建，避免三大平台各拉一条不同代次的 ffmpeg。
-#             代价（实测 2026-09-26）：linux64 资产 150,998,508 B / linuxarm64 127,417,700 B，
+#             **可人工核对的公布哈希**——api.github.com 的 release asset 带 `digest: sha256:<64hex>`，
+#             取值即按此填入 _PINNED_RUNTIME_SHA256（属平台公布的哈希文档，不是本地下载自算）。
+#             版本对齐：gyan/evermeet 当前均为 ffmpeg 9.0.x，故取 `-gpl-9.0` 系列而不是 master 滚动
+#             构建，避免三大平台各拉一条不同代次的 ffmpeg。
+#             [2026-09-27] URL 里的 release 标签必须钉**月末 autobuild**，绝不用 `latest` 或日更标签：
+#             `latest` 是滚动别名（同名资产被反复重传，digest 天天变，钉定当天就可能失配）；日更
+#             autobuild 标签实测只保留约两周，钉它等于预埋一次 404。月末标签（如
+#             autobuild-2026-08-31-13-27）实测保留到 2024-10-31，URL 与 digest 双双不可变——这才是
+#             「钉定」能成立的形态。代价：内置 ffmpeg 会比 `latest` 落后（现为 n9.0.1-11-ge47273f4d9，
+#             上游 latest 已到 n9.0.2），升级要人工换标签 + 换钉定值，属刻意的人工闸口。
+#             代价（实测 2026-09-27，月末标签资产）：linux64 126,600,656 B / linuxarm64 108,761,296 B，
 #             体积门禁需按 report_bundle_size.py 实跑复核，不估算。
 #             [历史注] 2026-09-22 起此槽用 johnvansickle 自包含 static 构建（amd64 41,888,096 B），
 #             换走的唯一原因是它只提供 *.md5、无 SHA256，导致 --strict 长期拦下发布。
@@ -989,8 +1002,14 @@ _FFMPEG_DOWNLOAD_URLS: dict[str, str] = {
     "windows-x64": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     "macos-x64": "https://evermeet.ca/ffmpeg/getrelease/zip",
     "macos-arm64": "https://evermeet.ca/ffmpeg/getrelease/zip",
-    "linux-x64": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz",
-    "linux-arm64": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linuxarm64-gpl-9.0.tar.xz",
+    "linux-x64": (
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
+        "autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz"
+    ),
+    "linux-arm64": (
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
+        "autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linuxarm64-gpl-9.0.tar.xz"
+    ),
 }
 
 
@@ -1045,8 +1064,8 @@ def _extract_linux_ffmpeg_binaries(archive: Path, ffmpeg_dir: Path) -> None:
     import tempfile
 
     # 布局一律**递归按名查**（_find_runtime_binary），不硬编码顶层目录形态：johnvansickle 是
-    # `ffmpeg-<ver>-<arch>-static/ffmpeg` 平铺，BtbN 是 `ffmpeg-n9.0-latest-linux64-gpl-9.0/bin/ffmpeg`
-    # （2026-09-26 实测该资产归档成员）。写死任一种，另一种产物会「解包成功但一件没拷」，
+    # `ffmpeg-<ver>-<arch>-static/ffmpeg` 平铺，BtbN 是 `<资产名去后缀>/bin/ffmpeg`（2026-09-27 实测
+    # 顶层 `ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0/`）。写死任一种，另一种产物会「解包成功但一件没拷」，
     # 而本函数的调用方对此并无感知——唯一兜底只剩出包前的 verify_runtime_binaries。
     missing: list[str] = []
     with tempfile.TemporaryDirectory(dir=ffmpeg_dir.parent) as tmp:

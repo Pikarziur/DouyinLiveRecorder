@@ -1627,6 +1627,57 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
 
+### v4.3.0-dev (2026-09-27) — 发布链修复：Linux ffmpeg 钉定改钉「月末不可变 release 标签」，并新增 `release-guard` 回收 build 失败遗留的空 Release
+
+- **背景**：tag 推送触发的 `Build & Release` 在 Linux build job 的 ffmpeg 下载步终止，日志末行
+  `[build][FATAL] _ffmpeg_temp.tar.xz SHA256 不匹配（期望 87de0900…，实际 0cfb2146…），已终止构建`；紧随
+  其后的 `softprops/action-gh-release` 步骤报 `⚠️ Pattern 'dist/*-lite.zip' does not match any files`
+  （`fail_on_unmatched_files: true`）。后者是「dist/ 无产物」的**连带症状**，不是独立故障——关掉
+  `fail_on_unmatched_files` 只会把这唯一可见的信号抹掉。
+- **根因**：`_FFMPEG_DOWNLOAD_URLS` 的 linux 两槽指向 BtbN 的 `releases/download/latest/...`。`latest` 是
+  **滚动别名**：同名资产被上游反复重传，digest 随之变化——实测 tag `latest` 的 `published_at` =
+  2026-09-26T13:22:38Z，即当日更早取到的钉定值 `87de0900…` 在同日即失配；linuxarm64 的 `30774c8f…` 同样
+  已失效（当前 `f2fe35e9…`）。
+- **处置（用户选定「换月度不可变标签」）**：两槽 URL 改钉**月末** autobuild 标签
+  `autobuild-2026-08-31-13-27`（资产 `ffmpeg-n9.0.1-11-ge47273f4d9-linux{64,arm64}-gpl-9.0.tar.xz`），
+  钉定值取自 `api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/<标签>` 的 `assets[].digest`
+  （linux64 `182c1b50…`、linuxarm64 `e2dd447c…`）。为什么必须钉月末标签：该库全量仅 **38 条** release，
+  日更 `autobuild-*` 只保留最近约两周（实测仅剩 09-13~09-26 共 15 条）→ 钉日更标签等于预埋一次 404；
+  月末标签实测可回溯到 `autobuild-2024-10-31`，是 URL 与 digest 双双不可变的唯一组合。代价：内置 ffmpeg
+  落后于 `latest` 的 n9.0.2（现 n9.0.1-11-ge47273f4d9），升级要人工换标签 + 换钉定值——与 SEV-10 的
+  人工闸口同口径，刻意不改自动取哈希。
+- **护栏（第二项）**：`build-release.yml` 新增 `release-guard` job（`needs: [prepare, build]`、
+  `if: always() && 发版路径 && needs.build.result != 'success'`），build 未全绿时用 `gh release delete`
+  回收 `release-create` 预建的空/残缺 Release（默认**不删 tag**）并留 `::warning::`。动因：
+  `release-create` 为消除三平台并发创建竞态，刻意在 build **之前**建记录；build 失败时收尾的 `release`
+  job 因 `needs: build` 被跳过，那条记录就以空 Release 形态留在仓库里，用户点进去一个附件都没有。
+- **改动面**：`build_exe.py`（URL 两条 + 钉定表两格 + 三处注释/取数口径更正：维护说明、Linux 来源段、
+  归档布局示例）；`tests/test_build_exe.py`（新增 `test_linux_ffmpeg_urls_pin_an_immutable_release_tag`：
+  禁 `/releases/download/latest/`、禁 `n9.0-latest-` 资产名、两架构必须同一标签）；
+  `.github/workflows/build-release.yml`（新增 `release-guard`，矩阵/缓存/构建/上传逻辑零改动）；
+  `AGENTS.md`（SEV-10 条目补「取数端点必须是月末标签」+ 回归锁名、「CI / workflow 约定」新增空 Release
+  护栏条目、体积读数按新资产更新）；`docs/agent-reference/measured-evidence.md`（2026-09-27 复测表）。
+- **实测（2026-09-27）**：`releases/latest` → linux64 150,999,836 B / `0cfb2146…`、linuxarm64 127,395,868 B /
+  `f2fe35e9…`（与旧钉定值均不相等）；`releases?per_page=100` → 全库 38 条；月末标签资产 → linux64
+  126,600,656 B / `182c1b50…`、linuxarm64 108,761,296 B / `e2dd447c…`（另有 `checksums.sha256` 资产可供
+  二次核对）；gyan.dev Windows `.sha256` 仍 `60f46726…`（未漂移）；nodejs.org 首个 `lts` 仍 `v24.21.0`
+  （未漂移）。月末资产经前缀取回确认是合法 xz（魔数 `fd377a585a00`），顶层目录
+  `ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0/`。
+- **验证**：`pytest tests/test_build_exe.py tests/test_check_runtime_pins.py` **115 passed**；全量 `pytest`
+  3229 passed / 14 skipped 且 warnings summary 为空（唯一失败 `test_web_config.py::TestFormatUrlLine::
+  test_normal_line` = 沙箱 DNS 解析 `live.douyin.com` 失败，单独重跑该用例 **1 passed**，与本次改动无关）；
+  `mypy`（无参）158 files Success；`basedpyright tests/test_build_exe.py` 0 errors / 0 warnings / 0 notes；
+  `black --check` / `isort --check-only` unchanged；`check_annotations.py` 通过；
+  `check_runtime_pins.py --strict` 仍 rc=0；`yaml.safe_load` 解析 workflow 通过且 `jobs` 顺序为
+  prepare / release-create / build / release-guard / release。改动文件行尾形态不变（build_exe.py、
+  AGENTS.md、CODE_WIKI*.md、measured-evidence.md 纯 CRLF；tests/test_build_exe.py 与 workflow 纯 LF）。
+- **未实测与交回动作**：① 本机 `github.com` 直链被重置（前缀取回 http=000、全量取回在 5.4MB 处中断），
+  「按新 URL 全量下载并比对钉定值」只能由 GitHub runner 首跑验证；② 月末资产归档内的
+  `bin/ffmpeg` / `bin/ffprobe` 未由本次前缀直接确认（5.4MB 前缀只覆盖 `doc/`），沿用 09-26 对同系列资产的
+  实测——缺件时 `_extract_linux_ffmpeg_binaries()` 会 `SystemExit`，不会退化成「一行 warning + 静默空包」；
+  ③ Linux full 包体积随换标签变化（126,600,656 B / 108,761,296 B），须由 CI 产物经
+  `scripts/report_bundle_size.py` 复核后再决定是否需要按平台调阈值。
+
 ### v4.3.0-dev (2026-09-26) — 发布链完整性门禁新增「官方签名档」，Linux ffmpeg 换源 BtbN：让 `build-release.yml` 的 prepare 由 rc=1 转 rc=0，同时不放宽 SEV-10 的 fail-closed 语义
 
 - **背景**：`build-release.yml` 的 prepare job 在 `Verify runtime binary SHA256 pins (fail-closed)` 一步报

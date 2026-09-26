@@ -1630,6 +1630,66 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > Scripts: `tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`
 > (`python file.py <URL> [seconds]`; requires a live room + network; manual channel by default).
 
+### v4.3.0-dev (2026-09-27) — Release-chain fix: Linux ffmpeg pins now point at an immutable month-end release tag, plus a `release-guard` job that rewinds the empty Release left behind by a failed build
+
+- **Background**: a tag-triggered `Build & Release` run died in the Linux build job's ffmpeg download step with
+  `[build][FATAL] _ffmpeg_temp.tar.xz SHA256 不匹配（期望 87de0900…，实际 0cfb2146…），已终止构建`, and the
+  very next step (`softprops/action-gh-release`) then reported
+  `⚠️ Pattern 'dist/*-lite.zip' does not match any files` (`fail_on_unmatched_files: true`). The second message
+  is a **downstream symptom** of "dist/ has no artefacts", not a separate fault — turning
+  `fail_on_unmatched_files` off would erase the only visible signal.
+- **Root cause**: both Linux slots of `_FFMPEG_DOWNLOAD_URLS` pointed at BtbN's
+  `releases/download/latest/...`. `latest` is a **rolling alias**: the same asset name is re-uploaded over and
+  over, so its digest keeps changing — tag `latest` was republished at `2026-09-26T13:22:38Z`, which invalidated
+  the pin value `87de0900…` taken earlier the same day; the arm64 pin `30774c8f…` was stale too (now `f2fe35e9…`).
+- **Chosen route (per the user: "switch to an immutable month-end tag")**: both slots now pin the **month-end**
+  autobuild tag `autobuild-2026-08-31-13-27` (assets
+  `ffmpeg-n9.0.1-11-ge47273f4d9-linux{64,arm64}-gpl-9.0.tar.xz`), with pin values taken from
+  `api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/<tag>` → `assets[].digest`
+  (linux64 `182c1b50…`, linuxarm64 `e2dd447c…`). Why month-end specifically: the repo holds only **38 releases**;
+  daily `autobuild-*` tags survive only about two weeks (only 09-13…09-26, 15 of them, were left), so pinning a
+  daily tag is planting a guaranteed 404, while month-end tags reach back to `autobuild-2024-10-31` — the only
+  combination where both URL and digest are immutable. Cost: the bundled ffmpeg lags `latest` (n9.0.2) and now
+  sits at n9.0.1-11-ge47273f4d9; upgrading means editing the tag **and** the pin by hand, which is exactly the
+  SEV-10 manual gate — deliberately not replaced by auto-fetching the current hash.
+- **Second item, the guardrail**: `build-release.yml` gains a `release-guard` job
+  (`needs: [prepare, build]`, `if: always() && release path && needs.build.result != 'success'`) that runs
+  `gh release delete` on the empty/partial Release pre-created by `release-create` (tag is **kept**) and emits a
+  `::warning::`. Why: `release-create` deliberately pre-allocates the Release before build to avoid three build
+  jobs racing to create it, but when a build fails the finalizing `release` job is skipped by `needs: build`, so
+  an empty Release stays in the repo with zero downloadable assets.
+- **Files touched**: `build_exe.py` (two URLs + two pin cells + three comment/maintenance corrections);
+  `tests/test_build_exe.py` (new `test_linux_ffmpeg_urls_pin_an_immutable_release_tag`: forbids
+  `/releases/download/latest/`, forbids the `n9.0-latest-` asset-name form, requires one shared tag across both
+  arches); `.github/workflows/build-release.yml` (new `release-guard` job only — matrix/cache/build/upload logic
+  untouched); `AGENTS.md` (SEV-10 entry gains the "month-end tag" rule and its regression lock; a new
+  empty-Release guardrail bullet under CI/workflow conventions; volume readings refreshed);
+  `docs/agent-reference/measured-evidence.md` (2026-09-27 re-measurement table).
+- **Measured (2026-09-27)**: `releases/latest` → linux64 150,999,836 B / `0cfb2146…`, linuxarm64 127,395,868 B /
+  `f2fe35e9…` (neither equals the old pins); `releases?per_page=100` → 38 releases total; month-end tag assets →
+  linux64 126,600,656 B / `182c1b50…`, linuxarm64 108,761,296 B / `e2dd447c…` (a `checksums.sha256` asset is
+  also published, usable as a second cross-check); gyan.dev Windows `.sha256` still `60f46726…` (no drift);
+  nodejs.org's first `lts` entry still `v24.21.0` (no drift). A prefix fetch confirmed the month-end asset is a
+  valid xz (magic `fd377a585a00`) whose top-level directory is
+  `ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0/`.
+- **Verification**: `pytest tests/test_build_exe.py tests/test_check_runtime_pins.py` → **115 passed**; full
+  `pytest` → 3229 passed / 14 skipped with an empty warnings summary (the single failure,
+  `test_web_config.py::TestFormatUrlLine::test_normal_line`, is the sandbox failing to resolve
+  `live.douyin.com`; re-run alone it is **1 passed**, unrelated to this change); `mypy` (no args) → Success over
+  158 files; `basedpyright tests/test_build_exe.py` → 0 errors / 0 warnings / 0 notes; `black --check` and
+  `isort --check-only` unchanged; `check_annotations.py` passes; `check_runtime_pins.py --strict` still rc=0;
+  `yaml.safe_load` on the workflow parses with jobs in the order prepare / release-create / build /
+  release-guard / release. Line endings unchanged (`build_exe.py`, `AGENTS.md`, `CODE_WIKI*.md`,
+  `measured-evidence.md` stay pure CRLF; the test file and the workflow stay pure LF).
+- **Not yet verified / handed back**: ① `github.com` direct links are reset on this box (prefix fetch → http=000,
+  full fetch died at 5.4 MB), so "download from the new URL and compare against the pin" can only be confirmed by
+  the first GitHub runner run; ② `bin/ffmpeg` / `bin/ffprobe` inside the month-end archive were not directly
+  confirmed by this prefix (5.4 MB only covered `doc/`) — we rely on the 09-26 measurement for the same asset
+  family; if they are missing, `_extract_linux_ffmpeg_binaries()` raises `SystemExit` rather than degrading to a
+  silent empty package; ③ Linux full-package size changes with the new tag (126,600,656 B / 108,761,296 B) and
+  must be re-checked against CI artefacts via `scripts/report_bundle_size.py` before touching any platform
+  threshold.
+
 ### v4.3.0-dev (2026-09-26) — Release-chain integrity gate gains an "official signature" mode and Linux ffmpeg moves to BtbN: `build-release.yml` prepare goes from rc=1 to rc=0 without loosening SEV-10's fail-closed semantics
 
 - **Background**: the prepare job failed at `Verify runtime binary SHA256 pins (fail-closed)` with
