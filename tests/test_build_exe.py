@@ -79,6 +79,26 @@ def test_macos_arm64_resolves_to_the_same_evermeet_build_as_x64(monkeypatch: pyt
     assert url.endswith("/ffmpeg/getrelease/zip"), url
 
 
+def test_linux_ffmpeg_urls_pin_an_immutable_release_tag() -> None:
+    # [2026-09-27] 发布链曾红在「钉了会变的来源」上：BtbN 的 `releases/download/latest/...` 是滚动
+    # 别名，同名资产被上游反复重传——实测 2026-09-26 当天取的 digest 在同日 13:22 重发后即失配，
+    # 构建在 SHA256 校验处 SystemExit → dist/ 无 zip → 上传步骤报 `Pattern 'dist/*-lite.zip' does
+    # not match any files`。日更 autobuild 标签也不能钉：上游只保留最近约两周（实测仅剩 09-13~
+    # 09-26 共 15 条），钉它等于预埋一次 404。只有**月末 autobuild 标签**（实测保留到
+    # autobuild-2024-10-31）能让 URL 与 digest 双双不可变，钉定才成立。
+    tags: set[str] = set()
+    for key in ("linux-x64", "linux-arm64"):
+        url = build_exe._FFMPEG_DOWNLOAD_URLS[key]
+        assert "/releases/download/latest/" not in url, f"{key} 仍钉在滚动别名 latest 上：{url}"
+        # 资产名带具体版本号（n9.0.1-11-g<hash>），与 latest 的 `n9.0-latest-` 形态互斥
+        assert "n9.0-latest-" not in url, f"{key} 的资产名仍是 latest 别名形态：{url}"
+        match = re.search(r"/releases/download/(autobuild-\d{4}-\d{2}-\d{2}-\d{2}-\d{2})/", url)
+        assert match is not None, f"{key} 未指向带日期的不可变 autobuild 标签：{url}"
+        tags.add(match.group(1))
+    # 两架构必须同一个标签：分头钉成两个标签等于让 x64/arm64 拉两条不同代次的 ffmpeg
+    assert len(tags) == 1, f"linux 两槽钉在了不同的 autobuild 标签上：{sorted(tags)}"
+
+
 def test_broken_arm64_endpoint_cannot_be_resurrected() -> None:
     # 形态锁，且**只看字符串字面量与函数体**：注释里记录「这条端点不存在」是必要的文档，
     # 但它绝不能再成为取值——无论写进来源表还是在下载函数里按 machine 现场拼接。
