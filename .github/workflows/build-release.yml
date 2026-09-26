@@ -411,6 +411,44 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # ── 1.5 失败护栏：build 未全绿时回收预建的（空/残缺）Release ──────────────
+  # 为什么需要单独一个 job：release-create 为消除「三平台 build 并发创建同一 Release」的竞态，
+  # 刻意在 build **之前**就把 Release 记录建好；一旦任一平台 build 失败（如 ffmpeg 钉定漂移 →
+  # 校验处 SystemExit → dist/ 无 zip），那条记录会以**空 Release** 形态留在仓库里：用户点进去
+  # 一个附件都没有，而收尾的 release job 因 `needs: build` 被跳过，无从补救。
+  # 判据沿用 release job 的同一口径（6 个 zip 才算完整，残缺即不发布）：build 结果非 success
+  # 时把该 Release 删掉并留 warning。刻意**不删 tag**——`gh release delete` 默认只删 Release 记录，
+  # 修好后重跑本工作流即可重新发布，不必重新打 tag。
+  release-guard:
+    name: Release guard (rollback incomplete release)
+    needs: [prepare, build]
+    if: >-
+      always() &&
+      (needs.prepare.outputs.is_release == 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.create_release == true)) &&
+      needs.build.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Delete incomplete release
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v${{ needs.prepare.outputs.version }}"
+          REPO="$GITHUB_REPOSITORY"
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release ${TAG} 不存在（未创建或已被回收），无需处理"
+            exit 0
+          fi
+          count=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets | length')
+          echo "build 结果=${{ needs.build.result }}；Release ${TAG} 现有 ${count} 个附件（完整应为 6 个）"
+          gh release delete "$TAG" --repo "$REPO" --yes
+          echo "::warning::已回收残缺 Release ${TAG}（原附件数 ${count}）。修复后重跑本工作流即可重新发布；tag 保留。"
+
   # ── 2. 创建 GitHub Release（tag 推送，或手动触发且勾选 create_release）──
   release:
     name: Create GitHub Release
