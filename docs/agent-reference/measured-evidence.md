@@ -79,9 +79,31 @@ Node 运行时以 24.19.0 实测为准（全部 JS 签名脚本 + migu.js 通过
 
 旧 `scripts/check_version.py` 只正则匹配「有没有 `version="${APP_VERSION}"` 这个字面」，顺序颠倒照样判 DYNAMIC——即门禁对 ARG 声明在使用点之后的失效永久失明。
 
-## macOS / Linux ffmpeg 上游不公布 SHA256 实测
+## 运行时上游完整性产物实测（evermeet / johnvansickle / BtbN / gyan）
 
 2026-09-22 实测三家上游不公布 SHA256：evermeet 只提供「追加 `/sig` 取 GPG 签名」、johnvansickle 只提供 `*.md5`。按「不得凭本地下载结果填写」的硬约束，宁可让发布链继续红在这 4 个槽位上（这是预期，不是回归）。
+
+2026-09-26 复测与逐条取数命令（读数时刻即核对时刻——滚动别名下次运行会变，回填钉定值前须重跑）：
+
+| 探针 | 读数 |
+| --- | --- |
+| `curl -sSL https://evermeet.ca/ffmpeg/getrelease/zip/sig` | 200，`application/pgp-signature`，594 B，**二进制** OpenPGP 包（非 armor）；重定向落点 `e.deolaha.ca:4242/pub/ffmpeg/ffmpeg-9.0.2.zip.sig`（当前滚动指向 ffmpeg 9.0.2，与 gyan 同代次） |
+| `curl -sS "https://keys.openpgp.org/pks/lookup?op=get&search=0x476C4B611A660874"` | 200，`application/pgp-keys`，4060 B，UID `static FFmpeg binaries (signing key) <ffmpeg@evermeet.c…>`，服务端回显指纹分组 `20F6 EA3E 0CFD 6B4C 5344 7A73 476C 4B61 1A66 0874` ≡ `build_exe._RUNTIME_GPG_SIGNATURES` 的钉定值（**独立于 evermeet 通道的第二渠道印证**，指纹不再只是 TOFU-of-key 单渠道） |
+| `curl -sS https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz.md5` | 200，`7fa72b652e19bf84c9461e332ea1cdf3  ffmpeg-release-amd64-static.tar.xz`（与 09-22 记录逐字相同）；同路径 `.sha256` → **404**；产物 `Content-Length` amd64 `41,888,096` / arm64 `19,337,412` |
+| `curl -sS https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest` | tag `latest`；`ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` = 150,998,508 B / `sha256:87de09009b85f61d452f5edcc702885c2ac7cb5f2016b30bd273b454df87eb9a`；`ffmpeg-n9.0-latest-linuxarm64-gpl-9.0.tar.xz` = 127,417,700 B / `sha256:30774c8ff65512d1700c4d552d4bfed30a9924576b38aab8e4deb9c744597d61`（Linux 两槽的钉定值即取自此 `assets[].digest`） |
+| BtbN 归档成员布局 | 对 asset 做 `Accept: application/octet-stream` + `Range: bytes=0-4000000` 的前缀取回后 `tar -tJf`：顶层 `ffmpeg-n9.0-latest-linux64-gpl-9.0/`，可执行件位于 **`bin/ffmpeg`、`bin/ffprobe`**（与 johnvansickle 的平铺布局不同，故解压走递归按名查） |
+
+**2026-09-27 复测**（起因：发布链红在 Linux ffmpeg 的 SHA256 校验处，钉定值当天即失配）：
+
+| 探针 | 读数 |
+| --- | --- |
+| `curl -sS https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest` | tag `latest` 的 `published_at` = **2026-09-26T13:22:38Z**（当日重发）；`ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz` = 150,999,836 B / `sha256:0cfb214610c711681bd76861edd51b1c5e1aaa223c9a86b944cdb1869cabd7d9`；`ffmpeg-n9.0-latest-linuxarm64-gpl-9.0.tar.xz` = 127,395,868 B / `sha256:f2fe35e97ed20f5d189d933128cab78e513f9586a0b70effc92ce8b374cb8577`——与上表 09-26 记录的 `87de0900…` / `30774c8f…` 均不相等，即滚动别名下钉定必然漂移 |
+| `curl -sS "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=100&page=1"` | 全库仅 **38 条** release：日更 `autobuild-*` 只留最近约两周（2026-09-13~09-26 共 15 条），**月末**标签长期保留（可回溯到 `autobuild-2024-10-31-12-59`）→ 钉 URL 只能钉月末标签 |
+| `curl -sS https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/autobuild-2026-08-31-13-27` | `ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz` = 126,600,656 B / `sha256:182c1b509720e939bb47bfb47dc29cc0c298640401128e3dce8627d10707eb5a`；`ffmpeg-n9.0.1-11-ge47273f4d9-linuxarm64-gpl-9.0.tar.xz` = 108,761,296 B / `sha256:e2dd447c8a47849c5812d87e54a47b20ae0f3603d38989440f4a5fe1af8755b1`（Linux 两槽现钉此标签；另有 `checksums.sha256` 资产可作二次核对） |
+| `curl -sSL https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256` | 仍 `60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba`（windows-x64 钉定未漂移） |
+| `curl -sS https://nodejs.org/dist/index.json` | 首个 `lts` 项仍 `v24.21.0`（Krypton，2026-09-07）→ node × 5 槽钉定未漂移 |
+
+本机网络边界（决定可复现范围）：`github.com/.../releases/download/...` 直链在本机 `Connection was reset`（`http=000`），只有 `api.github.com` 的 octet-stream 通道可用；因此「按来源表 URL 全量下载并比对钉定值」这最后一步只能由 GitHub runner 首次实跑验证，本机只能验到 asset 存在、大小、digest 与前缀成员布局。
 
 ## 虎牙 FLV-first 冷启动采样
 

@@ -918,9 +918,9 @@ brew install node
 
 ## ⏳ 更新日志
 
-### v4.3.0 (2026-09-16 ~ 2026-09-26) — P0 修复 ffmpeg master 构建下录制 100% 失败（`-thread_queue_size` 被上游收窄为输出专属选项）/ 布尔配置解析口径统一（`true/false` 致 8 项配置静默失效、9 个海外平台无法录制）/ 两轮全量代码审查（62 + 106 项分级修复）/ 供应链加固（官方哈希优先 + GPG 验签 + 删除蓝奏云兜底）/ Apple Silicon 的 ffmpeg PATH 让位策略 / 日志房间关联字段与 `/health` 探活端点 / 构建产物体积 −21.6% / 覆盖率 73.28% → 82.03%
+### v4.3.0 (2026-09-16 ~ 2026-09-27) — P0 修复 ffmpeg master 构建下录制 100% 失败（`-thread_queue_size` 被上游收窄为输出专属选项）/ 布尔配置解析口径统一（`true/false` 致 8 项配置静默失效、9 个海外平台无法录制）/ 两轮全量代码审查（62 + 106 项分级修复）/ 供应链加固（官方哈希优先 + GPG 验签 + 删除蓝奏云兜底）/ 发布链四处故障修复（**对外分发的 lite 包一度从未真正存在**）/ Apple Silicon 的 ffmpeg PATH 让位策略 / 日志房间关联字段与 `/health` 探活端点 / 构建产物体积 −21.6% / 覆盖率 73.28% → 82.03%（专项）与 83.91%（09-27 终态）
 
-> 本版本（v4.3.0，2026-09-16 ~ 09-26）为一次以「正确性 + 供应链安全」为主线的收敛周期。三处最值得注意：① **P0**：ffmpeg master 构建把 `-thread_queue_size` 收窄为输出专属选项，我们仍放在 `-i` 之前，导致该构建下**每一次录制都以 `-22 (EINVAL)` 退出、零字节产物**；② **布尔配置解析口径统一**：`config.ini` 写 `true/false` 曾被判为无效并**静默**回落硬编码兜底值（无告警无日志），实测致 8 项配置生效值漂移，其中最严重的一项使 9 个海外平台 100% 无法录制，现已统一为「`是/否` 与 `true/false`/`1/0`/`yes/no`/`on/off` 等价」；③ **两轮全量代码审查**（09-19 的 62 项：严重 12 / 中等 22 / 轻微 28；09-21 的 `CODE_REVIEW_2026-09-20` 106 项：严重 10 / 中等 70 / 轻微 26）把 SSRF、面板接管、凭据明文落盘、弹幕线程死循环等一批静默失效形态一次性清掉。**存在破坏性变更**，见下方专节。详细根因与验证见 [CODE_WIKI.md](CODE_WIKI.md)。
+> 本版本（v4.3.0，2026-09-16 ~ 09-27）为一次以「正确性 + 供应链安全」为主线的收敛周期。四处最值得注意：① **P0**：ffmpeg master 构建把 `-thread_queue_size` 收窄为输出专属选项，我们仍放在 `-i` 之前，导致该构建下**每一次录制都以 `-22 (EINVAL)` 退出、零字节产物**；② **布尔配置解析口径统一**：`config.ini` 写 `true/false` 曾被判为无效并**静默**回落硬编码兜底值（无告警无日志），实测致 8 项配置生效值漂移，其中最严重的一项使 9 个海外平台 100% 无法录制，现已统一为「`是/否` 与 `true/false`/`1/0`/`yes/no`/`on/off` 等价」；③ **两轮全量代码审查**（09-19 的 62 项：严重 12 / 中等 22 / 轻微 28；09-21 的 `CODE_REVIEW_2026-09-20` 106 项：严重 10 / 中等 70 / 轻微 26）把 SSRF、面板接管、凭据明文落盘、弹幕线程死循环等一批静默失效形态一次性清掉；④ **发布链四处故障**（09-26 ~ 09-27），其中最影响用户的一条是：`make_zip` 用 `Path.with_suffix(".zip")` 收尾，而版本号本身带点，lite 与 full 算出同一个附件名，第二次以覆盖模式原地截断第一次，**某次 Release 实际只留下一个既无平台也无变体标识的包，精简版从未分发出去**。**存在破坏性变更**，见下方专节。详细根因与验证见 [CODE_WIKI.md](CODE_WIKI.md)。
 
 **🐛 修复的问题**
 - **P0：ffmpeg master 构建下录制 100% 失败**：`-thread_queue_size` 被上游收窄为 muxer 专属选项，置于 `-i` 之前时 ffmpeg 以 `Option thread_queue_size … cannot be applied to input url … Error opening input files: Invalid argument`（返回码 -22）退出；与房间 / 平台 / CDN 无关，该构建下每次录制都失败。
@@ -930,6 +930,8 @@ brew install node
 - **发布链与供应链**：macOS arm64 的 full 包**静默不含 ffmpeg**（上游无该产物，下载点已修复）；Windows 运行期 ffmpeg 主源经实测确认健康（gyan.dev 带 `.sha256` 文档，与发布期钉定互证）；官方 SHA256 钉定值回填 6/10 槽。
 - **测试卫生（09-23）**：一处跨文件补丁泄漏（漏掉的 `undo()`）让同会话后续用例发出真实网络请求，造成 13 条失败里 11 条「全量红、单跑绿」的假失败。
 - **P0：构建脚本污染测试会话（09-23）**：`build_exe._ensure_utf8_streams()` 裸 `reconfigure` 破坏 pytest 的 fd 捕获，表现为「GUI 启动失败」弹窗与无关用例被判 FAILED/ERROR（九个 CI job 全为 ubuntu，恒绿不复现）。
+- **发布链四处故障（09-26 ~ 09-27，对外产物受影响）**：① 钉定表八个槽位被误改成「官方签名档」标记，`check_runtime_pins.py --strict` 在 prepare 阶段即 rc=1，发布根本走不到构建（已按官方通道回填哈希）；② Linux 内置 ffmpeg 的钉定值取自 BtbN 的滚动 `latest` 别名，上游同日重发同名资产即换 digest，发布链当天红在 SHA256 校验（改钉**月末不可变 release 标签** `autobuild-2026-08-31-13-27`，URL 与 digest 双不可变）；③ **lite 精简包从未真正分发出去**：`make_zip` 以 `Path.with_suffix(".zip")` 收尾，而版本号 `4.3.0` 自带点，`DouyinLiveRecorder-v4.3.0-windows-amd64-lite` 与 `-full` 被截成同一个 `DouyinLiveRecorder-v4.3.zip`，第二次以覆盖模式原地截断第一次且不报错，Release 附件里只剩一个既无平台也无变体标识的包；④ 任一平台构建失败时，预建的 Release 记录会以**空 Release** 留在仓库里。
+- **元数据第二副本漂移（09-27）**：`DouyinLiveRecorder.egg-info/PKG-INFO` 的 `Requires-Dist: h2` 仍停在旧下限 `>=4.3.0`（清单早已抬到 `>=4.4.1` 却从未传播进元数据），内嵌 README 亦缺整段 v4.3.0 更新日志；重建修正。
 
 **✨ 新增功能 / 改进**
 - **日志房间关联字段 `extra[room]`**：`src/logger.py` 新增 `ROOM_FIELD` / `set_room_context()` / `get_room_context()`（内部 `ContextVar` + patcher），多房间交织日志可按房间切出。
@@ -939,6 +941,11 @@ brew install node
 - **构建产物体积优化（09-24）**：排除 `PIL._avif`、`pydantic.v1.mypy`（拖入整个 mypy）、uvicorn 可选实现、`i18n/*.po` 等运行期不可达模块 + zip `compresslevel=9`，lite 产物 **82.77MB → 64.88MB（−21.6%）**、zip **54.84MB → 42.19MB（−23.1%）**，并新增 `scripts/report_bundle_size.py` 度量脚本。
 - **新增五类门禁**：`PYTHONUTF8=1` + 「告警即失败」（消灭 GBK locale 下 isort 静默跳文件且 rc=0）、装饰器契约 AST 锁、测试卫生 AST 锁（R1–R4 / R6「手工 MonkeyPatch 必须配对 undo」）、前端目录一致性锁（`data-i18n*` 键与四语内嵌目录逐一比对）、`deps-audit` job 与覆盖率无数据硬失败。
 - **动态并发下限下调**：`ConcurrencyScheduler` 的 `min_capacity` 默认值 8 → 1。
+- **内置 ffmpeg 的上游与满足口径（09-26 ~ 09-27）**：Linux 两架构换源 BtbN 的 GPL 完整版资产（按 `<os>-<arch>` 运行时键分列），取数端点固定为月末不可变标签；macOS 两槽走**官方 GPG 签名档**（evermeet 不公布 SHA256，验签即该槽唯一判据，带外钉完整 40 位主钥指纹）。哈希钉定与验签两条防线互不替代。
+- **`release-guard`：残缺即不发布（09-27）**：构建未全绿时用 `gh release delete` 回收预建的空/残缺 Release（默认不删 tag，修好后重跑工作流即可重新发布），并留 `::warning::`；上传步骤的 `fail_on_unmatched_files` 刻意不放宽，因为那条红是产物缺失的唯一可见信号。
+- **`--dual` 双产物的两道新校验（09-27）**：出包前先清 `dist/` 里上一轮残留的 `DouyinLiveRecorder-v*.zip`（复用工作区的构建机不会把旧包一起扫进附件）；出包后必须确认 lite 与 full 两个产物路径互不相同且都已真实落件，否则当场终止。
+- **CI 的 typecheck job 现在装固定版本 `pytest==9.1.1`（09-26）**：此前只装 `requirements.txt + mypy`，`tests/` 里所有 `pytest.*` 都按 `Any` 检查，fixture 与 `pytest.fail()` 的 `NoReturn` 全部失效，等于半个盲区。
+- **文档体积整理（09-27，零信息删除）**：`CODE_WIKI*.md` 更新日志里 73 个历史「涉及文件（按模块分类）」清单块逐字外迁到 `docs/agent-reference/changelog-file-inventories{,-en}.md`（wiki 本体 zh −12.3% / en −5.0%），同时补回上一轮批量压缩静默用 `…` 截断的 109（zh）/ 181（en）处表格原文；`README.md` / `README_EN.md` 刻意不压缩（面向使用者的发布说明不做退化）。
 
 **⚠️ 破坏性变更 / 行为变化**
 - **Windows 运行期删除蓝奏云 ffmpeg 兜底**：自动安装只剩主源一条路（实测该直链为带人机验证的 HTML 页、伴生哈希文档全 404，不可用）；自动安装失败时改为给出明确的手动安装指引。**Windows 用户若原先依赖该兜底，需按 README 的「Windows 手动安装 ffmpeg」章节自行放置二进制。**
@@ -947,6 +954,9 @@ brew install node
 - **布尔配置写法语义变化**：此前写 `true/false`、`1/0` 等被**静默忽略**（回落到兜底值）的键，升级后按其字面生效 —— 若你的配置依赖旧的错误兜底值，升级后生效值会改变，请在升级后核对 8 项相关配置。
 - **运行时依赖 20 → 23 条**：新增显式声明 `urllib3>=2.7.0`（CVE-2026-44431）、`h2>=4.4.1`（PYSEC-2026-3628）与 `socksio>=1.0.0`（httpx 的 http2 / SOCKS 运行期依赖），`starlette` 下限 `>=0.49.1` → **`>=1.3.1`**（CVE-2026-48710 与 PYSEC-2026-2280/2281/248/249），`protobuf` 保持 `<8` 上限（gencode 兼容护栏）。
 - **构建期**：`build-release.yml` prepare 以 `check_runtime_pins.py --strict` 拦下未钉定的运行时二进制。
+- **`build_exe.py --dual --no-zip` 现在直接报错退出**：`--dual` 分支此前从不读 `no_zip`，即用户显式写的 `--no-zip` 被静默无视、照样压出两个大 zip。矛盾参数组合改为 fail-fast，不再让其中一个参数不起作用。
+- **发布附件名恢复平台与变体标识，请改用新附件**：重新发布后 Windows / Linux / macOS 的附件名形如 `DouyinLiveRecorder-v4.3.0-<os>-<arch>-lite.zip` 与 `-full.zip`；此前形如 `DouyinLiveRecorder-v4.3.zip`（无平台段、无变体段）的附件属上述缺陷产物，其内容是完整版，精简版从未存在过。
+- **Linux 完整版（full）体积显著增大**：换源 BtbN 后内置 ffmpeg 资产（未压缩口径）为 linux64 ≈126.6 MB / linuxarm64 ≈108.8 MB，而原 johnvansickle amd64 静态构建 ≈41.9 MB。选择 `lite` 包可保持小体积（运行期按需自动下载）。
 
 **🛠️ 仓库维护与质量门禁**
 - **测试覆盖率专项（09-21）**：`src/` 覆盖率 **73.28% → 82.03%**（仅动 `tests/`，产品代码零改动），并引入分层白名单（表默认空 + 到期即失败）。
@@ -954,11 +964,14 @@ brew install node
 - **元数据同源同步**：`AGENTS.md` 依赖条数与下限口径、`CODE_WIKI*.md` 依赖表（16 → 23 条）、`DouyinLiveRecorder.egg-info` 重建、`.dockerignore` 补 `_probe_*.py`、`config/config.ini` 补 `[Cookie] ttwid`。
 - **类型存根与注释治理**：`typings/execjs/` 7 个 `.pyi` 补齐注解、两个抽象基类存根去 `six`（改 `metaclass=ABCMeta`）；全仓多批注释精炼（含 68 文件一轮），`scripts/check_annotations.py` 新增第三盲点（换行符形态）。
 - **清理已删除模块残留**：`src/weverse_auth.py` / `tests/test_weverse_auth.py`（2026-09-23 删除）在目录树、依赖注释与四语目录中的 3 条孤儿译文一并清除。
+- **跨文件一致性同步（09-27）**：`requirements.txt` ↔ `pyproject.toml [project.dependencies]` 23 ↔ 23 包名集合逐项相等、三组 extras 相等；`python_build = 3.14` 与 `node_version = 24` 在 `ci.yml` / `build-release.yml` 同值；14 个本地工具目录 + 6 个运行期产物目录在 `.gitignore` / `.dockerignore` / `pyproject` 各工具排除表 / `.coveragerc-concurrency` 四套清单中无缺项；本轮实际修订仅一处——`websockets>=14.0` 被截断的行内注释按同源文本补全（规格未动）。
+- **`AGENTS.md` 体积整理（09-27）**：把已在 `docs/agent-reference/measured-evidence.md` 留存的读数改为指针、合并三处真重复，97,034 → 95,715 B（−1.4%）；同时以「token 保全审计」自证未丢约束（用例名 / 错误码 / 常量与环境变量名丢失数均为 0）。
 
 **🧪 测试与验证**
-- 全量 `pytest` **3199 passed / 13 skipped**；另有 1 条 `test_symlinked_system_hit_inside_bundled_dir_keeps_prepending` 在**本机 Windows** 恒红——该主机 `Path.symlink_to()` 不产生真正的重分析点（不抛异常但不解引用），场景无法复现，CI 的 Linux/macOS 环境正常。
+- 全量 `pytest` **3240 passed / 14 skipped / 0 failed**（09-27 本机两轮实测，其中一轮带 `--cov=src`）。原先记述为「本机 Windows 恒红」的 `test_symlinked_system_hit_inside_bundled_dir_keeps_prepending` 现已改为按主机能力显式跳过（`symlink not permitted on this host`），计入上述 14 skipped，不再是失败项。
 - `black --check .` **169 files unchanged**；`isort --check-only .` 无重排；无参数 `mypy` **158 files 0 issues**（追加 `mypy --platform linux` 亦 0）；`basedpyright`（standard）**0 errors / 0 warnings / 0 notes**。
-- `node --test tests/frontend/*.mjs` 通过；`scripts/check_version.py` 与 `scripts/check_runtime_pins.py` 均 rc=0。
+- 覆盖率：`src/` 总覆盖率 **83.91%**，`scripts/check_coverage.py` **42 个模块全部达标**（`src/proto/douyin_pb2.py` 为 protoc 生成物，显式豁免）。
+- `node --test tests/frontend/*.mjs` 通过；`scripts/check_version.py` 与 `scripts/check_runtime_pins.py` 均 rc=0；`scripts/compile_po.py --check` 报 `zh_CN.mo` 与 `.po` 同步（781 条）。
 
 ### v4.2.0 (2026-09-12 ~ 2026-09-15) — 代码审查全量修复（~120 项·安全/并发/平台）+ 斗鱼「只出 SRT 无视频」根因定位与 HLS 分片层假绿探针 + 选源加固 + start_record 命令构造/平台分派单一定义点重构 + 仓库元数据同源同步与四语本地化一致性修复 + mypy 门禁扩面（范围下沉 `[tool.mypy].files`）与 6 处类型缺陷修复 + Linux CI 只读用例修复
 

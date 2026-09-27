@@ -34,7 +34,7 @@ Requires-Dist: pycryptodome>=3.23.0
 Requires-Dist: distro>=1.9.0
 Requires-Dist: tqdm>=4.69.0
 Requires-Dist: httpx[http2]>=0.28.1
-Requires-Dist: h2>=4.3.0
+Requires-Dist: h2>=4.4.1
 Requires-Dist: socksio>=1.0.0
 Requires-Dist: exejs>=1.0.1
 Requires-Dist: PyExecJS>=1.5.1
@@ -984,6 +984,48 @@ brew install node
 本项目基于 [MIT License](LICENSE) 开源，欢迎 Star 和 Fork！
 
 ## ⏳ 更新日志
+
+### v4.3.0 (2026-09-16 ~ 2026-09-26) — P0 修复 ffmpeg master 构建下录制 100% 失败（`-thread_queue_size` 被上游收窄为输出专属选项）/ 布尔配置解析口径统一（`true/false` 致 8 项配置静默失效、9 个海外平台无法录制）/ 两轮全量代码审查（62 + 106 项分级修复）/ 供应链加固（官方哈希优先 + GPG 验签 + 删除蓝奏云兜底）/ Apple Silicon 的 ffmpeg PATH 让位策略 / 日志房间关联字段与 `/health` 探活端点 / 构建产物体积 −21.6% / 覆盖率 73.28% → 82.03%
+
+> 本版本（v4.3.0，2026-09-16 ~ 09-26）为一次以「正确性 + 供应链安全」为主线的收敛周期。三处最值得注意：① **P0**：ffmpeg master 构建把 `-thread_queue_size` 收窄为输出专属选项，我们仍放在 `-i` 之前，导致该构建下**每一次录制都以 `-22 (EINVAL)` 退出、零字节产物**；② **布尔配置解析口径统一**：`config.ini` 写 `true/false` 曾被判为无效并**静默**回落硬编码兜底值（无告警无日志），实测致 8 项配置生效值漂移，其中最严重的一项使 9 个海外平台 100% 无法录制，现已统一为「`是/否` 与 `true/false`/`1/0`/`yes/no`/`on/off` 等价」；③ **两轮全量代码审查**（09-19 的 62 项：严重 12 / 中等 22 / 轻微 28；09-21 的 `CODE_REVIEW_2026-09-20` 106 项：严重 10 / 中等 70 / 轻微 26）把 SSRF、面板接管、凭据明文落盘、弹幕线程死循环等一批静默失效形态一次性清掉。**存在破坏性变更**，见下方专节。详细根因与验证见 [CODE_WIKI.md](CODE_WIKI.md)。
+
+**🐛 修复的问题**
+- **P0：ffmpeg master 构建下录制 100% 失败**：`-thread_queue_size` 被上游收窄为 muxer 专属选项，置于 `-i` 之前时 ffmpeg 以 `Option thread_queue_size … cannot be applied to input url … Error opening input files: Invalid argument`（返回码 -22）退出；与房间 / 平台 / CDN 无关，该构建下每次录制都失败。
+- **P0：布尔配置解析口径统一**：散落四处的解析（原 `!= "否"` / `== "是"` / 前端 `=== '是'`）统一到 `src/config_bool.py::parse_config_bool`；修复后 `global_proxy` 不再被错误置 False，TikTok / SOOP / PandaTV / WinkTV / Flextv / PopkonTV / Twitch / LiveMe / Faceit 等 9 个海外平台恢复解析。
+- **全量代码审查 62 项（09-19）**：GUI 空配置启动静默卡死；配置行多一个逗号致其后所有房间永久不录；Tars 解码缺边界校验致弹幕线程死循环；斗鱼弹幕被静默过滤（已修复项回归）；ffmpeg 挂起永久占用并发槽；零字节产物被判成功并撤销线路退避；`config.ini` 含凭据被明文复制到 `backup_config/`；Web 面板可被自身接口接管或锁死；房间 URL 零协议校验 → 盲 SSRF；脱敏黑名单漏掉「凭据嵌在值里」的 URL 型键；安装与打包链路零完整性校验。
+- **`CODE_REVIEW_2026-09-20` 全轮落地 106 项（09-21）**：并发信号量把「可用许可数」当容量（网络并发上限实质失控）；`PUT /api/rooms` 绕过房间入口校验；内网地址拦截用字符串前缀黑名单（实测 7 条放行 5 条）；面板认证可被单个写请求热关闭、大小写变体绕过口令哈希 / 防自锁 / token 吊销；CRLF 配置下删除房间永久静默失效却回报 `{"ok": true}`；Shopee 站点后缀解析拼出非法域名；兜底装饰器与返回契约错配（故障伪装「未开播」）；录制看门狗「停滞」判据基准用错（容忍窗口实际只有 30 秒）；`only_flv` 分支缺 `flv_url` 致时间字幕线程死循环写盘；发布链运行时二进制哈希钉定表为空。
+- **发布链与供应链**：macOS arm64 的 full 包**静默不含 ffmpeg**（上游无该产物，下载点已修复）；Windows 运行期 ffmpeg 主源经实测确认健康（gyan.dev 带 `.sha256` 文档，与发布期钉定互证）；官方 SHA256 钉定值回填 6/10 槽。
+- **测试卫生（09-23）**：一处跨文件补丁泄漏（漏掉的 `undo()`）让同会话后续用例发出真实网络请求，造成 13 条失败里 11 条「全量红、单跑绿」的假失败。
+- **P0：构建脚本污染测试会话（09-23）**：`build_exe._ensure_utf8_streams()` 裸 `reconfigure` 破坏 pytest 的 fd 捕获，表现为「GUI 启动失败」弹窗与无关用例被判 FAILED/ERROR（九个 CI job 全为 ubuntu，恒绿不复现）。
+
+**✨ 新增功能 / 改进**
+- **日志房间关联字段 `extra[room]`**：`src/logger.py` 新增 `ROOM_FIELD` / `set_room_context()` / `get_room_context()`（内部 `ContextVar` + patcher），多房间交织日志可按房间切出。
+- **Web 面板 `/health` 探活端点**：`GET /health` 返回 `{"status": "ok", "version": …}`，并把内置冒烟工具 `scripts/smoke_test.py` 接通为 CI 可执行的真实 HTTP 探活。
+- **W6：Apple Silicon 的 ffmpeg PATH 让位策略**：darwin + arm64 且系统 PATH 上另有原生 ffmpeg 时，不再无条件前置包内那份 x86_64 构建（需经 Rosetta 转译），五条判据全部成立才让位；其余平台逐字不变。
+- **运行时二进制完整性**：`build_exe.py` 新增 `_PINNED_RUNTIME_SHA256` 钉定表 + `--require-pinned`，配套 `scripts/check_runtime_pins.py`（结构模式进门禁 / `--strict` 进发布 prepare / `--emit-env` 供 CI 注入）；运行期首装改为「官方公布哈希优先」，发布期增加 GPG 验签与 full 包产物自检。
+- **构建产物体积优化（09-24）**：排除 `PIL._avif`、`pydantic.v1.mypy`（拖入整个 mypy）、uvicorn 可选实现、`i18n/*.po` 等运行期不可达模块 + zip `compresslevel=9`，lite 产物 **82.77MB → 64.88MB（−21.6%）**、zip **54.84MB → 42.19MB（−23.1%）**，并新增 `scripts/report_bundle_size.py` 度量脚本。
+- **新增五类门禁**：`PYTHONUTF8=1` + 「告警即失败」（消灭 GBK locale 下 isort 静默跳文件且 rc=0）、装饰器契约 AST 锁、测试卫生 AST 锁（R1–R4 / R6「手工 MonkeyPatch 必须配对 undo」）、前端目录一致性锁（`data-i18n*` 键与四语内嵌目录逐一比对）、`deps-audit` job 与覆盖率无数据硬失败。
+- **动态并发下限下调**：`ConcurrencyScheduler` 的 `min_capacity` 默认值 8 → 1。
+
+**⚠️ 破坏性变更 / 行为变化**
+- **Windows 运行期删除蓝奏云 ffmpeg 兜底**：自动安装只剩主源一条路（实测该直链为带人机验证的 HTML 页、伴生哈希文档全 404，不可用）；自动安装失败时改为给出明确的手动安装指引。**Windows 用户若原先依赖该兜底，需按 README 的「Windows 手动安装 ffmpeg」章节自行放置二进制。**
+- **Apple Silicon 不再无条件前置包内 ffmpeg 目录**：已用 Homebrew 装原生 arm64 ffmpeg 的用户，录制子进程会改用系统那份（版本 / 编译选项可能不同）。
+- **动态并发下限 8 → 1**：低负载场景下的网络并发额度不再被抬到 8。
+- **布尔配置写法语义变化**：此前写 `true/false`、`1/0` 等被**静默忽略**（回落到兜底值）的键，升级后按其字面生效 —— 若你的配置依赖旧的错误兜底值，升级后生效值会改变，请在升级后核对 8 项相关配置。
+- **运行时依赖 20 → 23 条**：新增显式声明 `urllib3>=2.7.0`（CVE-2026-44431）、`h2>=4.4.1`（PYSEC-2026-3628）与 `socksio>=1.0.0`（httpx 的 http2 / SOCKS 运行期依赖），`starlette` 下限 `>=0.49.1` → **`>=1.3.1`**（CVE-2026-48710 与 PYSEC-2026-2280/2281/248/249），`protobuf` 保持 `<8` 上限（gencode 兼容护栏）。
+- **构建期**：`build-release.yml` prepare 以 `check_runtime_pins.py --strict` 拦下未钉定的运行时二进制。
+
+**🛠️ 仓库维护与质量门禁**
+- **测试覆盖率专项（09-21）**：`src/` 覆盖率 **73.28% → 82.03%**（仅动 `tests/`，产品代码零改动），并引入分层白名单（表默认空 + 到期即失败）。
+- **四语目录持续补全与核验**：594 → **780 条**，四个目录键集逐条一致、无空值；`.mo` 随变更重编译。
+- **元数据同源同步**：`AGENTS.md` 依赖条数与下限口径、`CODE_WIKI*.md` 依赖表（16 → 23 条）、`DouyinLiveRecorder.egg-info` 重建、`.dockerignore` 补 `_probe_*.py`、`config/config.ini` 补 `[Cookie] ttwid`。
+- **类型存根与注释治理**：`typings/execjs/` 7 个 `.pyi` 补齐注解、两个抽象基类存根去 `six`（改 `metaclass=ABCMeta`）；全仓多批注释精炼（含 68 文件一轮），`scripts/check_annotations.py` 新增第三盲点（换行符形态）。
+- **清理已删除模块残留**：`src/weverse_auth.py` / `tests/test_weverse_auth.py`（2026-09-23 删除）在目录树、依赖注释与四语目录中的 3 条孤儿译文一并清除。
+
+**🧪 测试与验证**
+- 全量 `pytest` **3199 passed / 13 skipped**；另有 1 条 `test_symlinked_system_hit_inside_bundled_dir_keeps_prepending` 在**本机 Windows** 恒红——该主机 `Path.symlink_to()` 不产生真正的重分析点（不抛异常但不解引用），场景无法复现，CI 的 Linux/macOS 环境正常。
+- `black --check .` **169 files unchanged**；`isort --check-only .` 无重排；无参数 `mypy` **158 files 0 issues**（追加 `mypy --platform linux` 亦 0）；`basedpyright`（standard）**0 errors / 0 warnings / 0 notes**。
+- `node --test tests/frontend/*.mjs` 通过；`scripts/check_version.py` 与 `scripts/check_runtime_pins.py` 均 rc=0。
 
 ### v4.2.0 (2026-09-12 ~ 2026-09-15) — 代码审查全量修复（~120 项·安全/并发/平台）+ 斗鱼「只出 SRT 无视频」根因定位与 HLS 分片层假绿探针 + 选源加固 + start_record 命令构造/平台分派单一定义点重构 + 仓库元数据同源同步与四语本地化一致性修复 + mypy 门禁扩面（范围下沉 `[tool.mypy].files`）与 6 处类型缺陷修复 + Linux CI 只读用例修复
 

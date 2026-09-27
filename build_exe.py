@@ -1396,12 +1396,57 @@ def make_zip(version: str, suffix: str = "") -> Path:
     assert_no_credentials_in_release()
     os_tag = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
     arch = platform.machine().lower()
-    zip_base = DIST_DIR / f"{APP_NAME}-v{version}-{os_tag}-{arch}{suffix}"
-    zip_path = zip_base.with_suffix(".zip")
+    # `.zip` 必须与其余段拼进同一个 f-string，**不得**改用 Path.with_suffix(".zip")：版本号本身带点
+    # （如 4.3.0），with_suffix 把最后一个点之后的全部内容当旧扩展名整段丢弃，实测
+    # （Windows 的架构段实测是 amd64）DouyinLiveRecorder-v4.3.0-windows-amd64-lite
+    # → DouyinLiveRecorder-v4.3.zip，于是 lite 与 full
+    # 落到同一个路径、full 静默覆盖 lite，dist/ 只剩一个 zip（平台/架构标识也一起没了）。
+    # 2026-09-27 CI 实红即此形态：build-release.yml 的 lite/full 校验与 dist/*-lite.zip 上传通配双双落空。
+    zip_path = DIST_DIR / f"{APP_NAME}-v{version}-{os_tag}-{arch}{suffix}.zip"
+    # version / suffix 一旦含路径分隔符，f-string 拼出的就不再是**单个文件名**而是子路径，
+    # 成品会落到 DIST_DIR 之外（Windows 下 pathlib 把 `\` 当分隔符，实测 `make_zip("4.3.0\p1")`
+    # 的目标是 dist/DouyinLiveRecorder-v4.3.0/p1-<os>-<arch>.zip）。读版本失败时会回退 "0.0.0"，
+    # 静默写到别处比报错更难查，故按「父目录必须还是 dist/」这一结构性不变量拦住（同时覆盖 suffix）。
+    if zip_path.parent != DIST_DIR:
+        raise SystemExit(f"[build][FATAL] zip 产物名含路径分隔符，会写到 {DIST_DIR} 之外：{zip_path}")
     _zip_release_dir(zip_path)
     _assert_zip_has_no_runtime_artifacts(zip_path)
     print(f"[build] 压缩包已生成：{zip_path}（{zip_path.stat().st_size / 1024 / 1024:.1f} MB）")
     return zip_path
+
+
+# 压缩前剔除 dist/ 里上一次构建残留的 zip，并把被删名字打进日志（与 _clean_runtime_artifacts_from_release
+# 同口径：删了什么都要写出来，不留静默删除）
+def _clean_stale_release_zips() -> list[str]:
+    # 只按 `{APP_NAME}-v*.zip` 命中，不通配 dist/ 下的一切：用户自己放在 dist/ 里的其它压缩包不归本次
+    # 构建管辖。为什么必须删（2026-09-27 复核发布链时列为未闭合项）：build-release.yml 的
+    # 「Upload build artifact (inspection only)」用 `path: dist/*.zip`，凡是复用工作区的 runner
+    # （自建 / 手动 `--dual` 反复跑）都会把上一轮的 zip 连同本轮一起扫进附件——其中就包括
+    # with_suffix 截断缺陷时期那种名字里既无平台也无变体的 `DouyinLiveRecorder-v4.3.zip`。
+    # 必须在**第一个** zip 之前调用：放进 make_zip 内会让第二次删掉第一次的产物。
+    removed: list[str] = []
+    for victim in sorted(DIST_DIR.glob(f"{APP_NAME}-v*.zip")):
+        victim.unlink()
+        removed.append(victim.name)
+    return removed
+
+
+def _drop_stale_release_zips() -> None:
+    stale = _clean_stale_release_zips()
+    if stale:
+        print(f"[build] 压缩前已剔除 dist/ 内的陈旧 zip：{', '.join(stale)}")
+
+
+def _assert_dual_zips_are_two_files(lite_zip: Path, full_zip: Path) -> None:
+    # make_zip 只自证**单次调用**的名字结构；「两次调用算出同一个路径」这种病（2026-09-27 的
+    # with_suffix 截断即此形态）只有事后比对两个返回值才看得见——第二次以 zipfile `"w"` 打开同名文件
+    # 是原地截断，不报错、退出码 0。判据与 CI 的 `Verify dist contains both lite & full zips` 同源，
+    # 区别只是那条在 runner 上、这条在出包的那台机器上，本地跑 `--dual` 不必等 CI 就能看到红。
+    if lite_zip == full_zip:
+        raise SystemExit(f"[build][FATAL] --dual 的 lite 与 full 落到同一个文件，后者已覆盖前者：{lite_zip}")
+    missing = [zip_path.name for zip_path in (lite_zip, full_zip) if not zip_path.is_file()]
+    if missing:
+        raise SystemExit(f"[build][FATAL] --dual 已声称出包，但下列产物不存在：{', '.join(missing)}")
 
 
 # ==================== 冒烟测试 ====================
@@ -1638,6 +1683,11 @@ def main() -> None:
     dual = cast(bool, args.dual)
     if args.require_pinned and args.allow_unpinned:
         raise SystemExit("[build][FATAL] --require-pinned 与 --allow-unpinned 互斥")
+    # --dual 与 --no-zip 互斥（2026-09-27）：--dual 分支从不读 no_zip，旧形态是「显式写了 --no-zip
+    # 却被静默无视，照样压出 lite + full 两个大 zip」。矛盾参数组合必须 fail-fast，而不是让其中
+    # 一个不起作用——与 zip 名截断同族，都属「发布运行的实际行为与命令写出来的不一致」。
+    if dual and no_zip:
+        raise SystemExit("[build][FATAL] --dual 与 --no-zip 互斥（--dual 只产出 lite + full 两个 zip）")
     if args.require_pinned:
         _REQUIRE_PINNED_OVERRIDE = True
     elif args.allow_unpinned:
@@ -1658,28 +1708,32 @@ def main() -> None:
         # 「先出包再冒烟」不削弱冒烟的意义：跑仍是 dist/<APP_NAME>/ 里那三个 exe 本体（与 zip 内容
         # 逐文件同源），只是不再把运行期写入的产物压进包里。
         # 1) lite 版本：仅 config，不含运行时
+        _drop_stale_release_zips()
         copy_external_binaries(include_runtime=False)
         _prepare_url_config()  # 确保配置就绪（冒烟测试也需要）
-        _ = make_zip(version, suffix="-lite")
+        lite_zip = make_zip(version, suffix="-lite")
         # full 版本：下载并打包 ffmpeg + node
         download_runtime_binaries(RELEASE_DIR)
-        _ = make_zip(version, suffix="-full")
+        full_zip = make_zip(version, suffix="-full")
+        _assert_dual_zips_are_two_files(lite_zip, full_zip)
         if smoke:
             smoke_test()
-        print(f"[build] 完成。发布目录：{RELEASE_DIR}（已生成 lite + full 两个 zip）")
+        print(f"[build] 完成。发布目录：{RELEASE_DIR}（已生成 lite + full 两个 zip：{lite_zip.name}、{full_zip.name}）")
         return
 
     run_pyinstaller()
     copy_external_binaries(include_runtime=not no_runtime)
 
     # 同上（MID-2254）：先压缩、后冒烟，zip 内容永不含冒烟产物
+    zip_path: Path | None = None
     if not no_zip:
-        _ = make_zip(version)
+        _drop_stale_release_zips()
+        zip_path = make_zip(version)
 
     if smoke:
         smoke_test()
 
-    print(f"[build] 完成。发布目录：{RELEASE_DIR}")
+    print(f"[build] 完成。发布目录：{RELEASE_DIR}" + (f"（产物：{zip_path.name}）" if zip_path else ""))
 
 
 if __name__ == "__main__":

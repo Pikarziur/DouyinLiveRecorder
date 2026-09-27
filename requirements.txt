@@ -92,7 +92,7 @@ pydantic>=2.13.4           # 请求模型校验（FastAPI 依赖，代码直接�
 # src/platforms/ 各平台采集器 + src/proto/ 协议解码），并非构建期依赖。
 # 缺失会导致：venv 安装后 web.py 启动报 ModuleNotFoundError（douyin_pb2 导入链），
 # 且弹幕采集分支因无法导入而整体失效（2026-08 工作日志已确认需补装）。
-websockets>=14.0          # 弹幕 WebSocket 客户端（src/ws_client.py；additional_headers/proxy 参数为 14.0+ API，
+websockets>=14.0          # 弹幕 WebSocket 客户端（src/ws_client.py；additional_headers/proxy 参数为 14.0+ API，12/13.x 时 connect() 直接 TypeError 且被重连循环吞掉，弹幕永远连不上）
                          # 装到 12.x/13.x 时 connect() 直接 TypeError 且被重连循环吞掉，表现为弹幕永远连不上）
 # [2026-09-21 pip-audit 实测] 下界由 6.31.1 抬到 6.33.5：PYSEC-2026-1805 影响 6.31.1 本身，
 # 官方修复版本为 5.29.6 / 6.33.5 —— 旧下界正好落在受影响段内。上限 <8 保持不动（F-14）。
