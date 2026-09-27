@@ -969,7 +969,7 @@ def test_macos_ffmpeg_branch_fetches_both_archives_and_verifies(
 # ---------------------------------------------------------------------------
 
 
-def _stub_build_steps(monkeypatch: pytest.MonkeyPatch, order: list[str]) -> None:
+def _stub_build_steps(monkeypatch: pytest.MonkeyPatch, order: list[str], tmp_path: Path) -> None:
     # 把 main() 的每个重活换成「记名字」的桩：既验证顺序，也保证不碰网络与磁盘产物。
     def _make(name: str, ret: object) -> Any:
         def _stub(*args: object, **kwargs: object) -> object:
@@ -978,19 +978,33 @@ def _stub_build_steps(monkeypatch: pytest.MonkeyPatch, order: list[str]) -> None
 
         return _stub
 
+    # DIST_DIR 必须改指到 tmp：main() 出包前会真实调用 _clean_stale_release_zips() 删 dist/ 里的
+    # 陈旧 zip，不重定向就会在跑测试时删掉仓库 dist/ 下用户真正的构建产物。
+    monkeypatch.setattr(build_exe, "DIST_DIR", tmp_path / "dist")
     for name in ("run_pyinstaller", "copy_external_binaries", "download_runtime_binaries", "smoke_test"):
         monkeypatch.setattr(build_exe, name, _make(name, None))
     monkeypatch.setattr(build_exe, "_prepare_url_config", _make("_prepare_url_config", None))
-    monkeypatch.setattr(build_exe, "make_zip", _make("make_zip", Path("stub.zip")))
+
+    # make_zip 的桩必须**按 suffix 产出不同名字**并在盘上真实落件：--dual 分支现在会拿两个返回值
+    # 做「互不相同且都存在」的事后校验，返回常量路径的旧桩会让三条 --dual 用例全部误红。
+    def _fake_make_zip(*args: object, **kwargs: object) -> Path:
+        order.append("make_zip")
+        suffix = str(kwargs.get("suffix", args[1] if len(args) > 1 else "") or "")
+        zip_path = cast(Path, build_exe.DIST_DIR) / f"stub{suffix}.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.write_bytes(b"PK\x03\x04")
+        return zip_path
+
+    monkeypatch.setattr(build_exe, "make_zip", _fake_make_zip)
 
 
 def _zip_positions(order: list[str]) -> list[int]:
     return [i for i, name in enumerate(order) if name == "make_zip"]
 
 
-def test_dual_build_zips_both_variants_before_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dual_build_zips_both_variants_before_smoke(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     order: list[str] = []
-    _stub_build_steps(monkeypatch, order)
+    _stub_build_steps(monkeypatch, order, tmp_path)
     monkeypatch.setattr(sys, "argv", ["build_exe.py", "--dual", "--smoke"])
     build_exe.main()
     zips = _zip_positions(order)
@@ -1000,11 +1014,49 @@ def test_dual_build_zips_both_variants_before_smoke(monkeypatch: pytest.MonkeyPa
     assert all(z < smoke_at for z in zips), f"冒烟必须排在两个 zip 之后（否则日志进包）：{order}"
     # full zip 必须在运行时下载之后（否则包里没有 ffmpeg/node），且仍在冒烟之前
     assert order.index("download_runtime_binaries") < zips[-1] < smoke_at, order
+    # 事后校验的输入侧证据：两个变体各自落件，名字互不相同
+    produced = sorted(p.name for p in (tmp_path / "dist").glob("*.zip"))
+    assert produced == ["stub-full.zip", "stub-lite.zip"], produced
 
 
-def test_single_build_zips_before_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dual_build_prunes_stale_zips_before_first_zip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # 出包前清理 dist/ 的**接线**：陈旧 zip 不清就会被 build-release.yml 的 `path: dist/*.zip`
+    # 连同本轮产物一起扫进附件（僵尸附件）。删不掉本用例就红——它锁的是「main() 里真的有这次调用
+    # 且排在第一次 make_zip 之前」，而不是 _clean_stale_release_zips 自身的返回值。
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    stale_buggy = dist / "DouyinLiveRecorder-v4.3.zip"  # with_suffix 截断缺陷时期的产物名形态
+    stale_old = dist / "DouyinLiveRecorder-v4.2.0-windows-amd64-full.zip"
+    user_file = dist / "release-notes.txt.zip"  # 不归本构建管辖，绝不得碰
+    for victim in (stale_buggy, stale_old, user_file):
+        victim.write_bytes(b"PK\x03\x04")
     order: list[str] = []
-    _stub_build_steps(monkeypatch, order)
+    _stub_build_steps(monkeypatch, order, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["build_exe.py", "--dual"])
+    build_exe.main()
+    assert not stale_buggy.exists(), order
+    assert not stale_old.exists(), order
+    assert user_file.is_file(), "清理范围越界：非本产物名的 zip 也被删了"
+    assert _zip_positions(order), order
+
+
+def test_no_zip_build_keeps_existing_dist_zips(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # 反向：不出包就不清理。--no-zip（ci.yml 的 build-verify 形态）下把用户 dist/ 里的 zip 删掉
+    # 是纯粹的副作用，必须锁住「没出包 → 一个文件都没删」。
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    keeper = dist / "DouyinLiveRecorder-v4.2.0-windows-amd64-lite.zip"
+    keeper.write_bytes(b"PK\x03\x04")
+    order: list[str] = []
+    _stub_build_steps(monkeypatch, order, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["build_exe.py", "--smoke", "--no-zip", "--no-runtime"])
+    build_exe.main()
+    assert keeper.is_file(), order
+
+
+def test_single_build_zips_before_smoke(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    order: list[str] = []
+    _stub_build_steps(monkeypatch, order, tmp_path)
     monkeypatch.setattr(sys, "argv", ["build_exe.py", "--smoke"])
     build_exe.main()
     zips = _zip_positions(order)
@@ -1012,11 +1064,11 @@ def test_single_build_zips_before_smoke(monkeypatch: pytest.MonkeyPatch) -> None
     assert zips[0] < order.index("smoke_test"), f"非 dual 路径同样必须先压缩后冒烟：{order}"
 
 
-def test_no_zip_build_still_smokes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_zip_build_still_smokes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # 反向：--no-zip（ci.yml 的 build-verify 即用此形态）不该因为「zip 在前」的新顺序
     # 而丢掉冒烟——本用例锁「冒烟仍在」，防止把解耦写成「干脆不冒烟」。
     order: list[str] = []
-    _stub_build_steps(monkeypatch, order)
+    _stub_build_steps(monkeypatch, order, tmp_path)
     monkeypatch.setattr(sys, "argv", ["build_exe.py", "--smoke", "--no-zip", "--no-runtime"])
     build_exe.main()
     assert "make_zip" not in order, order
@@ -1149,6 +1201,144 @@ def test_make_zip_accepts_clean_archive(monkeypatch: pytest.MonkeyPatch, tmp_pat
     )
     zip_path = build_exe.make_zip("9.9.9")
     assert zip_path.is_file()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-27 CI 实红：zip 文件名被 Path.with_suffix(".zip") 截断。
+# 版本号带点（如 4.3.0）时 with_suffix 从**最后一个点**起把尾巴整段当旧扩展名丢弃，
+# DouyinLiveRecorder-v4.3.0-windows-amd64-{lite,full} 双双变成 DouyinLiveRecorder-v4.3.zip
+# （架构段写 amd64：那是 platform.machine().lower() 在 Windows 上的实际取值，x64 只是
+# _NODE_ARCH_MAP 归一后的运行时键名，从不出现在产物名里）。
+# 于是 full 静默覆盖 lite、dist/ 只剩一个 zip，build-release.yml 的「lite+full 齐全」校验
+# 与 dist/*-lite.zip 上传通配同时落空。上方两条既有 make_zip 用例对**名字**都不设判据
+# （test_make_zip_aborts_when_archive_still_contains_logs 只断言 SystemExit 的文本、
+# test_make_zip_accepts_clean_archive 只断言 zip_path.is_file()），名称漂移对它们完全隐形
+# —— 本组用例锁的正是名称形态与「两个 zip 互不覆盖」。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("suffix,tail", [("-lite", "lite"), ("-full", "full")])
+def test_make_zip_name_keeps_dotted_version_and_variant_suffix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str, tail: str
+) -> None:
+    _stub_make_zip_inputs(monkeypatch, tmp_path, [f"{build_exe.APP_NAME}/_internal/a.py"])
+    zip_path = build_exe.make_zip("4.3.0", suffix=suffix)
+    # 结构锁：完整的 v4.3.0（两个点都在）+ <os>-<arch> 段 + 变体段 + .zip 扩展名。
+    pattern = rf"DouyinLiveRecorder-v4\.3\.0-(windows|macos|linux)-[a-z0-9_]+-{tail}\.zip"
+    assert re.fullmatch(pattern, zip_path.name), zip_path.name
+
+
+def test_dual_suffixes_do_not_collide_on_one_zip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # --dual 的真实失效形态：两次 make_zip 落到同一个路径，后一次覆盖前一次，
+    # 磁盘上只剩一个 zip（内容是 full、名字什么变体都不带）。判据只数文件，不复算命名实现。
+    _stub_make_zip_inputs(monkeypatch, tmp_path, [f"{build_exe.APP_NAME}/_internal/a.py"])
+    lite = build_exe.make_zip("4.3.0", suffix="-lite")
+    full = build_exe.make_zip("4.3.0", suffix="-full")
+    assert lite != full
+    produced = sorted(p.name for p in (tmp_path / "dist").glob("*.zip"))
+    assert len(produced) == 2, produced
+    assert lite.is_file() and full.is_file()
+
+
+def test_make_zip_refuses_name_containing_path_separator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # version/suffix 含分隔符时，f-string 拼出的是**子路径**而不是文件名，成品会落到 dist/ 之外。
+    # 用 '/' 而非 os.sep：Windows 的 pathlib 同样把 '/' 当分隔符，Linux 上 '\' 却是合法文件名字符，
+    # 故 '/' 是唯一在两侧都真实走到拒收分支的取值（不得靠 skipif 让 CI 少跑一半）。
+    # 两个入参位都要测：守卫拦的是「拼出来的路径落点」，只测 version 会让 suffix 那一半没有锁。
+    _stub_make_zip_inputs(monkeypatch, tmp_path, [f"{build_exe.APP_NAME}/_internal/a.py"])
+    for version, suffix in (("4.3.0/escape", ""), ("4.3.0", "-lite/escape")):
+        with pytest.raises(SystemExit) as caught:
+            build_exe.make_zip(version, suffix=suffix)
+        assert "路径分隔符" in str(caught.value), (version, suffix)
+        assert not (tmp_path / "dist" / "DouyinLiveRecorder-v4.3.0").exists(), (version, suffix)
+        assert list((tmp_path / "dist").glob("*.zip")) == [], (version, suffix)
+        assert list(tmp_path.glob("*.zip")) == [], (version, suffix)
+
+
+def test_dual_and_no_zip_are_mutually_exclusive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # --dual 分支从不读 no_zip：旧形态下 `--dual --no-zip` 照样压出两个大 zip，用户显式写的
+    # --no-zip 被静默无视。现在必须 fail-fast；断言 order 为空即锁「判定早于任何构建步骤」。
+    order: list[str] = []
+    _stub_build_steps(monkeypatch, order, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["build_exe.py", "--dual", "--no-zip", "--smoke"])
+    with pytest.raises(SystemExit) as caught:
+        build_exe.main()
+    assert "--dual 与 --no-zip 互斥" in str(caught.value)
+    assert order == [], order
+    assert list((tmp_path / "dist").glob("*.zip")) == [], "互斥判定必须早于清理，否则报错前已经删过文件"
+
+
+def _stub_two_colliding_zips(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, order: list[str]) -> Path:
+    # 复现 2026-09-27 的真实失效形态：两次 make_zip 返回同一个路径（名字里没有变体段），
+    # 第二次以 zipfile "w" 原地截断第一次，进程退出码 0、零可见症状。
+    victim = tmp_path / "dist" / "DouyinLiveRecorder-v4.3.zip"
+    victim.parent.mkdir(parents=True, exist_ok=True)
+
+    def _fake(*args: object, **kwargs: object) -> Path:
+        order.append("make_zip")
+        victim.write_bytes(b"PK\x03\x04")
+        return victim
+
+    monkeypatch.setattr(build_exe, "make_zip", _fake)
+    return victim
+
+
+def test_dual_build_aborts_when_both_variants_land_on_one_zip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # 本地兜底：CI 那条 `Verify dist contains both lite & full zips` 只在 runner 上跑，
+    # 本机 `--dual` 出包时同样必须抓到「两个变体撞成一个文件」，否则缺陷又要等一轮发布才现形。
+    order: list[str] = []
+    _stub_build_steps(monkeypatch, order, tmp_path)
+    victim = _stub_two_colliding_zips(monkeypatch, tmp_path, order)
+    monkeypatch.setattr(sys, "argv", ["build_exe.py", "--dual"])
+    with pytest.raises(SystemExit) as caught:
+        build_exe.main()
+    assert "同一个文件" in str(caught.value), str(caught.value)
+    assert len(_zip_positions(order)) == 2, order
+
+
+def test_dual_build_aborts_when_a_variant_zip_is_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # 事后校验的另一半：名字互异但其中一个根本没落盘（磁盘满 / 被外部删掉）同样不得放行。
+    order: list[str] = []
+    _stub_build_steps(monkeypatch, order, tmp_path)
+    made: list[Path] = []
+
+    def _fake(*args: object, **kwargs: object) -> Path:
+        order.append("make_zip")
+        suffix = str(kwargs.get("suffix", "") or "")
+        zip_path = cast(Path, build_exe.DIST_DIR) / f"stub{suffix}.zip"
+        if suffix != "-full":  # full 只报成功不落件
+            zip_path.parent.mkdir(parents=True, exist_ok=True)
+            zip_path.write_bytes(b"PK\x03\x04")
+        made.append(zip_path)
+        return zip_path
+
+    monkeypatch.setattr(build_exe, "make_zip", _fake)
+    monkeypatch.setattr(sys, "argv", ["build_exe.py", "--dual"])
+    with pytest.raises(SystemExit) as caught:
+        build_exe.main()
+    assert "不存在" in str(caught.value), str(caught.value)
+    assert [p.name for p in made] == ["stub-lite.zip", "stub-full.zip"], made
+
+
+def test_clean_stale_release_zips_only_touches_own_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # 判据本体：按 `{APP_NAME}-v*.zip` 命中并**返回**被删名字（返回清单才可能被打印出来，
+    # 静默删除与不删同样糟）。dist/ 不存在时必须是空操作而不是抛错——首次构建就是这个形态。
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    mine = [dist / "DouyinLiveRecorder-v4.3.zip", dist / "DouyinLiveRecorder-v4.2.0-linux-x86_64-full.zip"]
+    keepers = [dist / "notes.zip", dist / "DouyinLiveRecorder.txt"]
+    for victim in mine + keepers:
+        victim.write_bytes(b"x")
+    monkeypatch.setattr(build_exe, "DIST_DIR", dist)
+    removed = build_exe._clean_stale_release_zips()
+    assert sorted(removed) == ["DouyinLiveRecorder-v4.2.0-linux-x86_64-full.zip", "DouyinLiveRecorder-v4.3.zip"]
+    assert not any(victim.exists() for victim in mine)
+    assert all(victim.exists() for victim in keepers)
+    # 幂等：再来一次不得报错、也不得删掉别的
+    assert build_exe._clean_stale_release_zips() == []
+    missing = tmp_path / "no-such-dist"
+    monkeypatch.setattr(build_exe, "DIST_DIR", missing)
+    assert build_exe._clean_stale_release_zips() == []
 
 
 # ---------------------------------------------------------------------------
