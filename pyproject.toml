@@ -1,6 +1,6 @@
 [project]
 name = "DouyinLiveRecorder"
-version = "4.3.0"
+version = "4.4.0"
 description = "支持抖音、TikTok、YouTube、快手等60+平台的直播录制工具，支持循环录制、多人录制、消息推送"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -319,14 +319,7 @@ exclude_also = [
     "if __name__ == .__main__.:",
 ]
 
-# 逐模块覆盖率门禁 — 由 scripts/check_coverage.py 机械强制执行
-# 修改阈值时同步更新该脚本中的 MODULE_THRESHOLDS
-# spider.py  >= 50%  (核心爬虫)
-# stream.py  >= 70%  (直播流解析)
-# utils.py   >= 80%  (工具函数)
-# ttwid.py   >= 85%  (认证模块)
-# ab_sign.py >= 95%  (签名模块)
-# proxy.py   >= 50%  (代理管理)
+# 逐模块覆盖率阈值只在 scripts/check_coverage.py 的 MODULE_THRESHOLDS 维护；此处不复制数值，避免双写漂移。
 
 [tool.basedpyright]
 # basedpyright 类型检查配置（本地增强，CI 仍以 mypy 为准）。

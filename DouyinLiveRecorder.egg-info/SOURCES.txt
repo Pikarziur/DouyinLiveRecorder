@@ -6,12 +6,6 @@ main.py
 msg_push.py
 pyproject.toml
 web.py
-D:/DouyinLiveRecorder-dev/DouyinLiveRecorder.egg-info/PKG-INFO
-D:/DouyinLiveRecorder-dev/DouyinLiveRecorder.egg-info/SOURCES.txt
-D:/DouyinLiveRecorder-dev/DouyinLiveRecorder.egg-info/dependency_links.txt
-D:/DouyinLiveRecorder-dev/DouyinLiveRecorder.egg-info/entry_points.txt
-D:/DouyinLiveRecorder-dev/DouyinLiveRecorder.egg-info/requires.txt
-D:/DouyinLiveRecorder-dev/DouyinLiveRecorder.egg-info/top_level.txt
 DouyinLiveRecorder.egg-info/PKG-INFO
 DouyinLiveRecorder.egg-info/SOURCES.txt
 DouyinLiveRecorder.egg-info/dependency_links.txt

@@ -30,7 +30,7 @@
 #
 # 产物：
 #     dist/DouyinLiveRecorder/                          发布目录（3 个 exe + 运行时目录 + _internal/ 依赖）
-#     dist/DouyinLiveRecorder-{ver}-{os}-{arch}.zip     压缩包
+#     dist/DouyinLiveRecorder-v{ver}-{os}-{arch}{suffix}.zip  压缩包（普通构建 suffix 为空，--dual 为 -lite/-full）
 #
 import argparse
 import hashlib

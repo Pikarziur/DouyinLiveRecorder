@@ -210,7 +210,7 @@ DouyinLiveRecorder/
 ├── logs/                       # log dir (generated at runtime, includes danmaku_monitor.jsonl)
 ├── i18n/                       # i18n translation dirs (multilingual, multi-format)
 │   ├── zh_CN/LC_MESSAGES/      # Simplified Chinese (gettext)
-│   │   ├── zh_CN.po           # Chinese translation source (601 entries)
+│   │   ├── zh_CN.po           # Chinese translation source (780 translation keys; 781 entries including the header)
 │   │   └── zh_CN.mo           # compiled translation (required at runtime, shipped with repo)
 │   ├── en_US.json              # English (US) (JSON catalog)
 │   ├── en_GB.json              # English (UK) (British spelling variant)
@@ -327,6 +327,8 @@ mp4格式重新编码为h264 = 否
 弹幕分片时长(秒) = 1800
 # Danmaku recording platforms (comma-separated) — the 5 currently supported platforms
 弹幕录制平台(逗号分隔) = 斗鱼直播,B站直播,虎牙直播,抖音直播,TwitchTV
+# Per-recording duration limit in seconds; 0 means unlimited, default is 6 hours
+单次录制时长上限(秒,0为不限制) = 21600
 ```
 
 ### Push config (config/config.ini)
@@ -419,8 +421,8 @@ twitcasting密码 =
 
 ```ini
 [Web]
-# Web management panel listen address
-web_host = 0.0.0.0
+# Web management panel listen address (localhost-only by default; explicitly change to 0.0.0.0 for Docker/LAN access)
+web_host = 127.0.0.1
 # Web management panel port
 web_port = 8000
 # Whether password login is enabled (true/false)
@@ -555,7 +557,7 @@ Background mode: set `web_show_console` to `false`; under Windows the console wi
 
 Under Windows the console defaults to "minimize to system tray" (`web_minimize_to_tray = true`): after clicking minimize the window disappears from the taskbar and collapses to the system tray; double-click the tray icon to restore; the title-bar close button is disabled — exit via the tray icon menu's "Exit program".
 
-> ⚠️ **Security note**: listening on 0.0.0.0 by default without auth enabled — for public/LAN deployment be sure to enable `web_auth_enable` and set a strong password, or change `web_host` to `127.0.0.1`.
+> ⚠️ **Security note**: the default bind is localhost-only (`127.0.0.1`) with authentication disabled. If Docker, LAN, or public access requires binding to `0.0.0.0`, enable `web_auth_enable` and set a strong password at the same time.
 
 ### Recommended recording formats
 
@@ -711,7 +713,7 @@ Only the `web` service (Web management panel mode) maps ports; the `recorder` / 
 
 ```yaml
 ports:
-  - "8000:8000"   # Web management panel port (only takes effect with --profile web)
+  - "127.0.0.1:8000:8000"   # Web panel port (web profile only; exposed to the local host by default)
 ```
 
 ### Environment variables
@@ -761,13 +763,13 @@ black .
 # Sort imports
 isort .
 
-# Type check (CI uses mypy as the standard)
-mypy .
+# Type check (CI uses mypy; no path argument, scope comes from pyproject.toml [tool.mypy].files)
+mypy
 
 # Type check (local enhancement, optional): basedpyright
 # Configured in pyproject.toml under [tool.basedpyright], venvPath points to the workspace .venv (relative path, portable)
 # First time: create and install deps: python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
-basedpyright .
+basedpyright
 
 # Run tests
 pytest

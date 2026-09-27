@@ -80,7 +80,7 @@ Excluding `.git/`/`.venv/`/`node_modules/`, the workspace contains **100** Markd
 ### Project Basic Information
 
 - **Project Name**: DouyinLiveRecorder (Douyin Live Recorder)
-- **Version**: 4.3.0
+- **Version**: 4.4.0
 - **Author**: Hmily
 - **License**: MIT
 - **Project URL**: [GitHub](https://github.com/ihmily/DouyinLiveRecorder)
@@ -131,7 +131,7 @@ Platforms that support actual quality feedback and downgrade alerting: Douyin, T
 | asyncio + httpx | Asynchronous network requests |
 | asyncio | Async decorator support |
 | FFmpeg | Video recording and transcoding |
-| Node.js + execjs/PyExecJS | Run JavaScript signing algorithms (execjs preferred, PyExecJS fallback) |
+| Node.js + exejs/PyExecJS | Run JavaScript signing algorithms (exejs preferred, PyExecJS fallback) |
 | Loguru | Structured logging |
 | CustomTkinter + pystray + Pillow | GUI and system tray |
 | FastAPI + uvicorn | Web management panel backend |
@@ -1017,7 +1017,7 @@ def host_of(url: str) -> str: ...
 | Dependency | Purpose | Installation |
 | ------- | ------------------ | ----------------------------------------------------------- |
 | FFmpeg | Video recording and transcoding | Built-in on Windows (`ffmpeg/`), manual install on Linux/macOS; installed via apt inside Docker |
-| Node.js | Run JavaScript signing algorithms | Auto-installed on Windows (`node/`), needs a package manager on Linux; Node 22 installed via apt inside Docker |
+| Node.js | Run JavaScript signing algorithms | Auto-installed on Windows (`node/`), needs a package manager on Linux; Node 24 installed via apt inside Docker |
 
 ### Module Dependency Graph
 
@@ -1259,7 +1259,7 @@ The `docker-compose.yaml` at the repo root defines three services (sharing one i
 | Service | Entry | Start Command | Port |
 | -------------- | ---------------- | ------------------------------------ | ----------- |
 | `recorder` (default) | `python main.py` | `docker compose up -d` | None (pure CLI) |
-| `web` (profile) | `python web.py` | `docker compose --profile web up -d` | `8000:8000` |
+| `web` (profile) | `python web.py` | `docker compose --profile web up -d` | `127.0.0.1:8000:8000` |
 | `gui` (profile) | `python gui.py` | `docker compose --profile gui up -d` | None (requires X11) |
 
 Shared mount volumes: `./config`, `./downloads`, `./logs`, `./backup_config`.
@@ -1387,9 +1387,9 @@ Workflow file: `.github/workflows/ci.yml`, runs on push to main / PR, ensuring c
 
 | Job | Environment | Content |
 | -------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `static` | py3.15 | `black --check .` + `isort --check .` + `python scripts/check_version.py` (version single-source-of-truth check) + `python scripts/compile_po.py --check` (i18n po/mo sync check, zero side effects) + `python scripts/check_annotations.py` (annotation conventions: no docstrings / density floor / module headers, zero side effects) |
-| `typecheck` | py3.14 | Install requirements + pinned mypy, then run `mypy src/` (run on the minimum supported version so conclusions hold for the oldest interpreter) |
-| `test` | py3.14 / py3.15 matrix | `pytest --cov=src --cov-report=term-missing` (global `fail_under=50` gate, `fail-fast: false`); on the minimum version additionally runs the `scripts/check_coverage.py` per-module gate + coverage.xml upload + optional Codecov |
+| `static` | py3.14 | `black --check .` + `isort --check .` + `python scripts/check_version.py` (version single-source-of-truth check) + `python scripts/compile_po.py --check` (i18n po/mo sync check, zero side effects) + `python scripts/check_annotations.py` (annotation conventions: no docstrings / density floor / module headers, zero side effects) |
+| `typecheck` | py3.14 | Install requirements + pinned mypy, then run `mypy` (scope comes entirely from `pyproject.toml [tool.mypy].files`; the minimum supported version is still used so conclusions hold for the oldest interpreter) |
+| `test` | py3.14 | `pytest --cov=src --cov-report=term-missing` (global `fail_under=50` gate, `fail-fast: false`); on the minimum version additionally runs the `scripts/check_coverage.py` per-module gate + coverage.xml upload + optional Codecov |
 | `concurrency-test` | py3.14 | Concurrency-specific: under `COVERAGE_RCFILE=.coveragerc-concurrency` runs `test_concurrency_rate_limit.py` + `test_concurrency.py` + `test_async_http_lock.py` (dedicated config sets no global threshold) |
 | `integration-verify` | py3.14 + Node 24 | apt install ffmpeg; verify the ffmpeg/node binaries are discoverable, and call `check_ffmpeg_installed()` / `check_nodejs_installed()` to verify detection logic |
 | `build-verify` | py3.14 packaging interpreter | `build_exe.py --smoke --no-runtime --no-zip` (lite packaging + CLI/Web/GUI three-entry smoke, on Linux via `xvfb-run -a`); release-grade full packaging is left to build-release.yml |
@@ -1481,7 +1481,7 @@ Built-in, no installation needed
 
 ```bash
 # Ubuntu/Debian
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 sudo apt-get install -y nodejs
 
 # macOS
@@ -1581,8 +1581,8 @@ This fix uniformly takes effect for **all platforms** (Bilibili/Douyu/Huya/Douyi
 
 - Formatting: `black .`
 - Import sorting: `isort .`
-- Type checking: `mypy src/` (already with `disallow_untyped_defs = true`, fully passes `--strict` mode)
-- Type checking (enhanced, local): `basedpyright` is configured in `pyproject.toml` under `[tool.basedpyright]` (standard mode, excludes `typings/`/`node/`/`ffmpeg/` etc., `venvPath` points to the workbuddy managed venv); CI still uses `mypy src/` as the standard (basedpyright is not a CI check item, and re-specifying venvPath is needed when switching machines)
+- Type checking: `mypy` (already with `disallow_untyped_defs = true`, fully passes `--strict` mode)
+- Type checking (enhanced, local): `basedpyright` is configured in `pyproject.toml` under `[tool.basedpyright]` (standard mode, excludes `typings/`/`node/`/`ffmpeg/` etc., `venvPath` points to the workbuddy managed venv); CI still uses `mypy` as the standard (basedpyright is not a CI check item, and re-specifying venvPath is needed when switching machines)
 - Comment standard: Module/function descriptions uniformly use `#` line comments, **do not use triple-quote `"""` docstrings**; multi-line descriptions start each line with `#` (functional multi-line string literals excepted, e.g. templates/SQL, which should use single quotes + line concatenation instead of `"""`)
 
 ### Testing and Coverage

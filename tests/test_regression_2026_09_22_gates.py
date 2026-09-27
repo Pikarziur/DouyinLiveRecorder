@@ -75,6 +75,45 @@ def test_requirements_and_pyproject_dependency_name_sets_match() -> None:
     assert not only_proj, f"只在 pyproject [project.dependencies] 里、requirements.txt 缺失: {sorted(only_proj)}"
 
 
+# 元数据生成物也会反向影响运行时：源码目录下的 egg-info 优先于 pyproject 回退，uv.lock 则是 README
+# 推荐的 `uv sync` 输入。二者若不同步，版本展示与安装依赖会在同一工作区分叉。
+def test_tracked_egg_info_matches_pyproject_metadata() -> None:
+    pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads(pyproject_text)["project"]
+    pkg_info = (ROOT / "DouyinLiveRecorder.egg-info" / "PKG-INFO").read_text(encoding="utf-8")
+
+    version = next(line.partition(":")[2].strip() for line in pkg_info.splitlines() if line.startswith("Version:"))
+    runtime_specs = [
+        line.partition(":")[2].strip()
+        for line in pkg_info.splitlines()
+        if line.startswith("Requires-Dist:") and "extra ==" not in line
+    ]
+    egg_names = {
+        _normalize_dist_name(match.group(1)) for spec in runtime_specs if (match := _REQ_NAME.match(spec)) is not None
+    }
+
+    assert version == str(project["version"]), "egg-info 版本未随 pyproject.toml 重建"
+    assert egg_names == _names_from_pyproject_dependencies(pyproject_text), "egg-info 运行时依赖集合已漂移"
+
+
+def test_uv_lock_root_package_matches_pyproject_metadata() -> None:
+    pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads(pyproject_text)["project"]
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    roots = [
+        package
+        for package in lock.get("package", [])
+        if package.get("name") == "douyinliverecorder" and package.get("source", {}).get("editable") == "."
+    ]
+
+    assert len(roots) == 1, f"uv.lock 应恰有一个本项目 editable 根包，实际 {len(roots)} 个"
+    root_package = roots[0]
+    lock_names = {_normalize_dist_name(str(item["name"])) for item in root_package.get("dependencies", [])}
+
+    assert root_package.get("version") == project["version"], "uv.lock 根包版本未随 pyproject.toml 更新"
+    assert lock_names == _names_from_pyproject_dependencies(pyproject_text), "uv.lock 根包运行时依赖集合已漂移"
+
+
 def test_httpx_extra_runtime_requirements_are_declared() -> None:
     # SEV-2216 的**主锁**：httpx 的 extra 只有在运行期走到那条分支才 import，
     # 因此「清单里有没有声明」必须单独钉住，不能靠 httpx 的元数据自动带入。

@@ -16,6 +16,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# 仓库当前保留一份已跟踪的 DouyinLiveRecorder.egg-info 元数据快照；下列规则仅阻止
+# 其它/新增 egg-info 目录误入库，已跟踪文件仍会正常出现在 git diff 中并须随 pyproject 重建。
 .Python
 build/
 develop-eggs/
@@ -206,7 +208,8 @@ cython_debug/
 *~
 
 # ---------------- DouyinLiveRecorder 项目专用配置 ----------------
-# 配置文件（含敏感信息：录制账号 Cookie / 代理 / Web 密码等，禁止入库）
+# 配置文件（含敏感信息：录制账号 Cookie / 代理 / Web 密码等，禁止提交真实值）
+# config/config.ini 当前以脱敏基线模板形式被跟踪；本规则不隐藏其已跟踪改动，只阻止删除后或新增副本误入库。
 config/config.ini
 config/URL_config.ini
 

@@ -203,7 +203,7 @@ DouyinLiveRecorder/
 ├── logs/                       # 日志文件目录（运行时生成，含 danmaku_monitor.jsonl）
 ├── i18n/                       # 国际化翻译目录（多语言多格式）
 │   ├── zh_CN/LC_MESSAGES/      # 简体中文（gettext）
-│   │   ├── zh_CN.po           # 中文翻译源（601 条）
+│   │   ├── zh_CN.po           # 中文翻译源（780 个翻译键；含头部共 781 条）
 │   │   └── zh_CN.mo           # 编译后翻译（运行时必需，随仓库分发）
 │   ├── en_US.json              # English (US)（JSON 格式目录）
 │   ├── en_GB.json              # English (UK)（英式拼写变体）
@@ -320,6 +320,8 @@ mp4格式重新编码为h264 = 否
 弹幕分片时长(秒) = 1800
 # 弹幕录制平台(逗号分隔) - 目前支持的 5 个平台
 弹幕录制平台(逗号分隔) = 斗鱼直播,B站直播,虎牙直播,抖音直播,TwitchTV
+# 单次录制时长上限（秒）；0 表示不限制，默认 6 小时
+单次录制时长上限(秒,0为不限制) = 21600
 ```
 
 ### 推送配置 (config/config.ini)
@@ -411,8 +413,8 @@ twitcasting密码 =
 
 ```ini
 [Web]
-# Web 管理面板监听地址
-web_host = 0.0.0.0
+# Web 管理面板监听地址（默认仅本机；Docker/LAN 部署再显式改为 0.0.0.0）
+web_host = 127.0.0.1
 # Web 管理面板端口
 web_port = 8000
 # 是否启用密码登录（true/false）
@@ -546,7 +548,7 @@ Web 模式与命令行模式共用同一录制引擎与配置文件，直播间�
 
 Windows 下控制台默认「最小化到系统托盘」（`web_minimize_to_tray = true`）：点击最小化后窗口不在任务栏显示，而是收起到系统托盘，双击托盘图标即可恢复；标题栏关闭按钮已禁用，需从托盘图标菜单的「退出程序」退出。
 
-> ⚠️ **安全提示**：默认监听 0.0.0.0 且未启用认证，公网/局域网部署请务必开启 `web_auth_enable` 并设置强密码，或将 `web_host` 改为 `127.0.0.1`。
+> ⚠️ **安全提示**：默认仅监听 `127.0.0.1` 且未启用认证；若为 Docker / 局域网 / 公网访问改绑 `0.0.0.0`，必须同时开启 `web_auth_enable` 并设置强密码。
 
 ### 录制格式推荐
 
@@ -704,7 +706,7 @@ volumes:
 
 ```yaml
 ports:
-  - "8000:8000"   # Web 管理面板端口（仅 --profile web 时生效）
+  - "127.0.0.1:8000:8000"   # Web 管理面板端口（仅 --profile web 时生效，默认只暴露给宿主机本地）
 ```
 
 ### 环境变量
@@ -754,13 +756,13 @@ black .
 # 排序导入
 isort .
 
-# 类型检查（CI 以 mypy 为准）
-mypy .
+# 类型检查（CI 以 mypy 为准；不带路径，范围由 pyproject.toml [tool.mypy].files 定义）
+mypy
 
 # 类型检查（本地增强，可选）：basedpyright
 # 已在 pyproject.toml 配置 [tool.basedpyright]，venvPath 指向工作区 .venv（相对路径，可移植）
 # 首次需创建并安装依赖：python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
-basedpyright .
+basedpyright
 
 # 运行测试
 pytest

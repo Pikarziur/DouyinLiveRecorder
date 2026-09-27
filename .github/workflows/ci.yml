@@ -16,7 +16,7 @@
 #
 # Job 拓扑（lint / audit / type / test / build 七路并行，收尾串行汇总）：
 #
-#   setup ──┬── static             格式 / 导入序 / 版本一致性 / 运行时钉定表结构 / i18n po-mo 同步
+#   setup ──┬── static             格式 / 导入序 / 版本一致性 / 派生元数据一致性 / 运行时钉定表结构 / i18n po-mo 同步
 #           ├── deps-audit         pip-audit 按 OSV 审计 requirements.txt（补-05）
 #           ├── typecheck          mypy（最低支持版本 3.14；范围取 pyproject [tool.mypy].files）
 #           ├── test               pytest 矩阵（3.14）+ 全局与逐模块覆盖率门禁 + Web 面板 HTTP 冒烟
@@ -194,6 +194,8 @@ jobs:
               - 'msg_push.py'
               - 'requirements.txt'
               - 'pyproject.toml'
+              - 'uv.lock'
+              - 'DouyinLiveRecorder.egg-info/**'
               - '.coveragerc-concurrency'
               - 'Dockerfile'
               - 'docker-compose.yaml'
@@ -271,6 +273,15 @@ jobs:
       # （纯标准库实现，无需安装项目依赖）
       - name: Check version consistency
         run: python scripts/check_version.py
+
+      # 校验「派生元数据一致性」：uv.lock 与 DouyinLiveRecorder.egg-info 必须从 pyproject.toml
+      # 重新生成，不允许手改版本号（手写版本是 4.3.0 -> 4.4.0 那次 egg-info / uv.lock 没跟上的
+      # 根因，见 AGENTS.md「关键约定」#1 与 scripts/sync_metadata.py 头部说明）。
+      # --check 仅读 uv.lock / egg-info/PKG-INFO / pyproject.toml 做比对：不调用 uv / setuptools、
+      # 不联网、无需安装项目依赖，与 tests/test_regression_2026_09_22_gates.py 的两条元数据回归锁同口径。
+      # 路径过滤已把 uv.lock / egg-info 纳入 python 组，故手动改这两个文件也会触发本步。
+      - name: Check generated metadata is in sync with pyproject
+        run: python scripts/sync_metadata.py --check
 
       # 运行时二进制钉定表的**结构**检查（SEV-10）：空表 / 缺平台 / 缺槽位 / 与发布矩阵
       # 漂移即红。--strict（占位值也算失败）只在 build-release.yml 的 prepare 里跑，

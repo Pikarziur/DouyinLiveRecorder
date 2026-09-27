@@ -31,7 +31,7 @@ def _gencode_version() -> tuple[int, int, int]:
 
 
 def _declared_protobuf_specifier() -> str:
-    # 从 requirements.txt 取声明区间（形如 `protobuf>=6.31.1,<8 # 注释`）
+    # 从 requirements.txt 取声明区间（形如 `protobuf>=6.33.5,<8 # 注释`）
     for line in (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
         stripped = line.split("#", 1)[0].strip()
         if stripped.startswith("protobuf"):
