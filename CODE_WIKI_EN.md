@@ -1690,6 +1690,51 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
   must be re-checked against CI artefacts via `scripts/report_bundle_size.py` before touching any platform
   threshold.
 
+### v4.3.0-dev (2026-09-27) — Second release-chain fault fixed: eight slots of `_PINNED_RUNTIME_SHA256` had been rewritten to the official-signature marker; hashes re-pinned from the official channels
+
+- **Symptom**: the pasted log only carried the last two lines `Run softprops/action-gh-release@v3` /
+  `⚠️ Pattern 'dist/*-lite.zip' does not match any files`. It is read the same way as the entry above
+  (`fail_on_unmatched_files: true` is the only visible signal of a missing artefact and must stay on).
+  Re-computing locally exposed a **second fault in the current working tree that fires even earlier**:
+  eight slot values in `build_exe.py`'s `_PINNED_RUNTIME_SHA256` had been replaced wholesale with
+  `OFFICIAL_SIGNATURE_PIN` (file mtime 07:58, i.e. after the 01:45 wrap-up of the previous entry), which
+  moves the break point of the release chain from the build job forward to the prepare job.
+- **Root cause**: the signature mode only applies to slots whose upstream really publishes no hash *and*
+  which are registered in `_RUNTIME_GPG_SIGNATURES` with a signature URL plus the full 40-hex primary
+  fingerprint — in this repo that is only the four macOS ffmpeg/ffprobe slots. The five node slots
+  (nodejs.org `SHASUMS256.txt`), `windows-x64/ffmpeg` (gyan.dev `.sha256`) and the two Linux ffmpeg slots
+  (BtbN `assets[].digest`) all have officially published values; once turned into the marker,
+  `_is_signature_satisfied` returns False because the slot is unregistered → all three disjuncts of
+  `_slot_is_gated` are False. Two consequences: `scripts/check_runtime_pins.py --strict` returned **rc=1**
+  (the prepare job's fail-closed step goes red) and
+  `tests/test_build_exe.py::test_table_never_declares_signature_mode_without_satisfaction` **failed** —
+  that lock exists precisely to catch this rewrite.
+- **Action**: all eight values re-derived from the **official channels** named in the AGENTS.md /
+  `build_exe.py` maintenance notes, never from locally downloaded self-computed digests:
+  `curl -sS https://nodejs.org/dist/v24.21.0/SHASUMS256.txt` (win-x64 `.zip`, linux/macos `.tar.gz` — the
+  five asset names `_download_nodejs` actually fetches);
+  `curl -sSL https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256` → `60f46726…47ba`
+  (no drift);
+  `curl -sS https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/autobuild-2026-08-31-13-27`
+  → linux64 `182c1b50…` / linuxarm64 `e2dd447c…` (byte-identical to what measured-evidence.md records; a
+  month-end tag's digest is immutable); plus confirmation that the first `lts` entry of `dist/index.json`
+  is still `v24.21.0` (Krypton). The macOS ffmpeg/ffprobe slots keep the signature mode untouched.
+- **Scope**: `build_exe.py` only (8 pin values + one `[2026-09-27 restore]` note above the table + a
+  per-node-line source asset name). Logic, the URL table, the predicates, tests and workflows untouched.
+- **Verification**: before the change `check_runtime_pins.py --strict` was **rc=1** and
+  `test_table_never_declares_signature_mode_without_satisfaction` FAILED (8 offenders named per slot);
+  afterwards both `--strict` and the structural mode return **rc=0**, `pytest tests/test_build_exe.py`
+  **95 passed**, `python scripts/run_gates.py` **8/8 green rc=0**, full `pytest` **3230 passed /
+  14 skipped** with an empty warnings summary, `basedpyright build_exe.py` 0 errors / 0 warnings / 0 notes,
+  and `black --check` / `isort --check-only` / `py_compile` pass. End-of-line shape unchanged (build_exe.py
+  pure CRLF: 1686 CRLF / 0 bare LF).
+- **Not measured / handed back**: ① "download in full and compare against the pinned value" still only
+  runs on a GitHub runner first — `github.com` direct links are reset on this machine, only
+  `api.github.com`, `nodejs.org` and `gyan.dev` are reachable; ② during this session `build-release.yml`
+  was modified **concurrently** at 08:14 (a new `Verify dist contains both lite & full zips` step and
+  `| tee build_exe.log` on the build command). That file is neither changed nor reviewed by this entry;
+  under `pipefail` the `tee` does not swallow `SystemExit`, but its author should confirm before releasing.
+
 ### v4.3.0-dev (2026-09-26) — Release-chain integrity gate gains an "official signature" mode and Linux ffmpeg moves to BtbN: `build-release.yml` prepare goes from rc=1 to rc=0 without loosening SEV-10's fail-closed semantics
 
 - **Background**: the prepare job failed at `Verify runtime binary SHA256 pins (fail-closed)` with

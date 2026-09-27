@@ -489,31 +489,35 @@ OFFICIAL_SIGNATURE_PIN = "PINNED-OFFICIAL-GPG-SIGNATURE"
 #     vs johnvansickle amd64-static 41,888,096 B（实测 2026-09-26，见 _FFMPEG_DOWNLOAD_URLS 注释）。
 # [历史注] 2026-09-18 CR-11 只有校验框架、表为空且未钉定仅告警后继续（fail-open），
 #   2026-09-20 SEV-10 确认约 300MB 无校验二进制直接进分发包，改为上方 fail-closed 语义。
+# [2026-09-27 恢复] 下表 8 个槽位曾被整体改写成 OFFICIAL_SIGNATURE_PIN（该档只适用于「上游确实不公布
+# 哈希且已在 _RUNTIME_GPG_SIGNATURES 登记」的 macOS ffmpeg/ffprobe 四槽），于是 tests/test_build_exe.py
+# 的签名档不变量锁转红、check_runtime_pins.py --strict rc=1、发布链在 prepare 即断。取值一律按
+# 上方维护方式的**官方通道**重新核对（非本地下载自算）：nodejs.org SHASUMS256.txt、
+# gyan.dev .sha256、api.github.com releases/tags/<月末标签> → assets[].digest，读数时刻见
+# docs/agent-reference/measured-evidence.md。
 _PINNED_RUNTIME_SHA256: dict[str, dict[str, str]] = {
     # node 各段取值均来自 https://nodejs.org/dist/v24.21.0/SHASUMS256.txt（来源与复核方式见上方注释）
     "windows-x64": {
         # gyan.dev ffmpeg-release-essentials.zip.sha256（= ffmpeg 9.0.2 essentials_build，2026-09-22）
         "ffmpeg": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
-        # node-v24.21.0-win-x64.zip
+        # node-v24.21.0-win-x64.zip（_download_nodejs 在 Windows 下取 .zip）
         "node": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
     },
     "linux-x64": {
         # BtbN autobuild-2026-08-31-13-27 的 ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz
         # （api.github.com releases/tags/<标签> → assets[].digest，2026-09-27）
         "ffmpeg": "182c1b509720e939bb47bfb47dc29cc0c298640401128e3dce8627d10707eb5a",
-        # node-v24.21.0-linux-x64.tar.gz
+        # node-v24.21.0-linux-x64.tar.gz（非 .tar.xz：_download_nodejs 统一取 tar.gz）
         "node": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff",
     },
     "linux-arm64": {
         # 同一标签的 linuxarm64 资产；与上一条同一次取数（2026-09-27）
         "ffmpeg": "e2dd447c8a47849c5812d87e54a47b20ae0f3603d38989440f4a5fe1af8755b1",
-        # node-v24.21.0-linux-arm64.tar.gz
         "node": "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5",
     },
     "macos-x64": {
         # evermeet getrelease/zip：官方只给 GPG 签名（追加 /sig），无 SHA256 → 走官方签名档
         "ffmpeg": OFFICIAL_SIGNATURE_PIN,
-        # 与 ffmpeg 同一把钥匙签的独立归档（getrelease/ffprobe/zip），故同走官方签名档
         "ffprobe": OFFICIAL_SIGNATURE_PIN,
         # node-v24.21.0-darwin-x64.tar.gz
         "node": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097",

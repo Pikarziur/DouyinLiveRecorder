@@ -1678,6 +1678,41 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
   ③ Linux full 包体积随换标签变化（126,600,656 B / 108,761,296 B），须由 CI 产物经
   `scripts/report_bundle_size.py` 复核后再决定是否需要按平台调阈值。
 
+### v4.3.0-dev (2026-09-27) — 修复发布链第二处故障：`_PINNED_RUNTIME_SHA256` 八个槽位被误改成官方签名档标记，按官方通道重新回填哈希
+
+- **现象**：粘贴日志只有末两行 `Run softprops/action-gh-release@v3` / `⚠️ Pattern 'dist/*-lite.zip'
+  does not match any files`。该行的判读口径与上一条同源（`fail_on_unmatched_files: true` 是产物缺失的
+  唯一可见信号，不得关闭）。但本机复算时发现**当前工作区还有第二处、且更早发作的故障**：
+  `build_exe.py` 的 `_PINNED_RUNTIME_SHA256` 中 8 个槽位取值被整体写成 `OFFICIAL_SIGNATURE_PIN`
+  （文件 mtime 07:58，晚于上一条 01:45 的收尾记录），使发布链断点由 build job 前移到 prepare job。
+- **根因**：签名档只适用于「上游确实不公布哈希、且已在 `_RUNTIME_GPG_SIGNATURES` 登记签名 URL +
+  完整 40 位主钥指纹」的槽位，本仓只有 macOS 的 ffmpeg/ffprobe 四槽符合。node 五槽（nodejs.org
+  `SHASUMS256.txt`）、windows-x64/ffmpeg（gyan.dev `.sha256`）、linux 两槽 ffmpeg（BtbN 资产的
+  `assets[].digest`）都有官方公布值，改成标记后 `_is_signature_satisfied` 因「该槽未登记」判 False
+  → `_slot_is_gated` 三个析取项全 False。两条后果：`scripts/check_runtime_pins.py --strict` **rc=1**
+  （prepare 的 fail-closed 步直接红），以及 `tests/test_build_exe.py::
+  test_table_never_declares_signature_mode_without_satisfaction` **转红**（该锁正是为拦下这种改写而存在）。
+- **处置**：8 个槽位一律按 AGENTS.md/`build_exe.py` 维护说明的**官方通道**重新取数后回填，
+  **未**使用本地下载自算值：
+  `curl -sS https://nodejs.org/dist/v24.21.0/SHASUMS256.txt`（win-x64 `.zip`、linux/macos `.tar.gz`
+  五种资产，扩展名与 `_download_nodejs` 实际取用的包一致）；
+  `curl -sSL https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256` → `60f46726…47ba`
+  （未漂移）；`curl -sS https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/autobuild-2026-08-31-13-27`
+  → linux64 `182c1b50…` / linuxarm64 `e2dd447c…`（与 measured-evidence.md 记录逐字相等，月末标签 digest 不可变）；
+  并确认 `dist/index.json` 首个 `lts` 仍 `v24.21.0`（Krypton）。macOS 两槽的 ffmpeg/ffprobe 保持签名档不动。
+- **改动面**：仅 `build_exe.py`（钉定表 8 格取值 + 表头一行 `[2026-09-27 恢复]` 注 + 每条 node 行的来源资产名注释）；
+  逻辑、URL 表、判定函数、测试与 workflow **零改动**。
+- **验证**：改前 `check_runtime_pins.py --strict` **rc=1**、`test_table_never_declares_signature_mode_without_satisfaction`
+  FAILED（offenders 逐槽点名 8 个）；改后 `--strict` 与结构模式均 **rc=0**，`pytest tests/test_build_exe.py`
+  **95 passed**，`python scripts/run_gates.py` **8/8 全绿 rc=0**，全量 `pytest` **3230 passed / 14 skipped**
+  且 warnings summary 为空，`basedpyright build_exe.py` 0 errors / 0 warnings / 0 notes，
+  `black --check` / `isort --check-only` / `py_compile` 均通过。行尾形态不变（build_exe.py 纯 CRLF，
+  1686 个 CRLF / 0 个孤立 LF）。
+- **未实测与交回动作**：① 「按钉定值全量下载并比对」仍只能由 GitHub runner 首跑验证——本机 `github.com`
+  直链被重置，只有 `api.github.com` 与 `nodejs.org`/`gyan.dev` 可用；② 本次会话期间 `build-release.yml`
+  在 08:14 被**并行**改动（新增 `Verify dist contains both lite & full zips` 一步、构建命令加 `| tee build_exe.log`），
+  该文件不由本条改动、也未由本条复核，`pipefail` 下 `tee` 不会吞掉 `SystemExit`，但发版前请由作者确认。
+
 ### v4.3.0-dev (2026-09-26) — 发布链完整性门禁新增「官方签名档」，Linux ffmpeg 换源 BtbN：让 `build-release.yml` 的 prepare 由 rc=1 转 rc=0，同时不放宽 SEV-10 的 fail-closed 语义
 
 - **背景**：`build-release.yml` 的 prepare job 在 `Verify runtime binary SHA256 pins (fail-closed)` 一步报
