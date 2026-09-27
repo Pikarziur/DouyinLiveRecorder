@@ -369,7 +369,32 @@ jobs:
         if: matrix.platform != 'linux'
         env:
           DLR_RUNTIME_SHA256: ${{ needs.prepare.outputs.runtime_pins }}
-        run: python build_exe.py --smoke --dual --require-pinned
+        shell: bash
+        run: |
+          set -euo pipefail
+          python build_exe.py --smoke --dual --require-pinned 2>&1 | tee build_exe.log
+          echo "Dist after build:"
+          ls -la dist || true
+
+      - name: Verify dist contains both lite & full zips
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Contents of dist/:"
+          ls -la dist || true
+
+          shopt -s nullglob
+          lite=(dist/*-lite.zip)
+          full=(dist/*-full.zip)
+
+          echo "Found ${#lite[@]} lite zip(s) and ${#full[@]} full zip(s)."
+
+          if [ ${#lite[@]} -eq 0 ] || [ ${#full[@]} -eq 0 ]; then
+            echo "::error::Expected both *-lite.zip and *-full.zip in dist/, but missing one or both."
+            echo "Full listing:"
+            find dist -maxdepth 1 -type f -print
+            exit 1
+          fi
 
       - name: List build output
         shell: bash
@@ -387,8 +412,6 @@ jobs:
           (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
         uses: softprops/action-gh-release@v3
         with:
-          # 显式指定 tag_name，与 release-create / release 收尾三处保持一致，
-          # 避免手动分支触发时误挂到分支 ref
           tag_name: v${{ needs.prepare.outputs.version }}
           files: |
             dist/*-lite.zip
