@@ -74,7 +74,7 @@ docker compose --profile web up -d
 
 # Or build locally and start
 docker build -t douyin-live-recorder .
-docker run -d -v ./config:/app/config -v ./downloads:/app/downloads douyin-live-recorder
+docker run -d -v ./config:/app/config -v ./downloads:/app/downloads -v ./logs:/app/logs -v ./backup_config:/app/backup_config douyin-live-recorder
 ```
 
 > Inside the container, FFmpeg and Node.js are provided by the image itself (installed via apt) — no need to mount the local `ffmpeg/`, `node/` directories;

@@ -774,6 +774,11 @@ NETEASE_QUALITY_MAP = {"blueray": "OD", "ultra": "UHD", "high": "HD", "standard"
 - `index.html` - 单页应用入口（仪表盘 / 直播间 / 配置 三个视图）
 - `app.js` - 前端逻辑（Token 认证、API 调用、SSE 日志流、状态渲染）
 - `style.css` - 样式表（明暗主题、响应式布局、降级高亮）
+- **移动端适配惯例（2026-09-29）**：`index.html` 的 viewport 带 `viewport-fit=cover`；顶部/左右留白一律用
+  `env(safe-area-inset-*)`（灵动岛与 Home Indicator 避让）、页面高度用 `100dvh`（`100vh` 仅作回退）；
+  ≤768px 断点下顶栏拆两行（第一行品牌 + 语言/主题，第二行标签页整行横向滚动）、数据表在 `.panel` 内横向滚动
+  （保底 `min-width:540px`）。新增面板 / 新增列 / 新增交互控件时须沿用这三条例（相对单位 + 可换行 flex + 安全区），
+  约束细则与验证读数见「更新日志」的 2026-09-29 条目。
 
 **录制表格展示**:
 
@@ -1617,6 +1622,56 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本直跑时额外输出 `VERIFICATION_RESULT: {"platform":..., "status":..., ...}` 结构化一行供机器解析。
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
+
+### v4.4.0-dev (2026-09-29) — Web 面板移动端适配修复：顶栏两行化 + safe-area / `dvh` 适配 + 数据表面板内滚动，消除 iPhone 16 Pro Max 与 Pixel 10 上的裁切与横向滚动
+
+> 本节是本次改动的**模块级总览**（模块表 + 根因明细 + 验证读数）。改动面仅 Web 前端静态资源
+> （`web/index.html` + `web/style.css`），Python 侧零改动；**无删除项**——未删除任何规则、元素或文件，
+> 既有注释按「只增不改」惯例全部保留，本次只做「新增规则 + 改写已有声明」。
+
+**一、改动按模块分类（含新增 / 修改 / 删除 + 文件路径）**
+
+| 模块 | 变更性质 | 主要文件 | 关键改动 / 判据 |
+| --- | --- | --- | --- |
+| Web 页面骨架 | 修改 1 处 | `web/index.html` | viewport meta 补 `viewport-fit=cover`——缺省时 `env(safe-area-inset-*)` 恒为 0，安全区适配无从生效 |
+| Web 样式：顶栏 | 修改（重写布局约束） | `web/style.css` | `height:56px` → `min-height:56px`；四向 padding 改 `max(20px, env(safe-area-inset-*))`；`.tabs` 加 `min-width:0`；≤768px 断点下 `flex-wrap:wrap` 拆两行（第一行品牌 + 语言/主题，第二行标签页整行横向滚动） |
+| Web 样式：主内容区 | 修改 + 新增 | `web/style.css` | `.view` 左右 padding 接入安全区；`body` 新增 `min-height:100dvh`（保留原 `100vh` 作回退）与 `text-size-adjust:100%` 防横屏字号放大 |
+| Web 样式：数据表 | 新增 | `web/style.css` | ≤768px 断点下 `.panel{overflow-x:auto}`，仪表盘 / 弹幕 / 文件三张表 `min-width:540px`——列头不再被压成竖排折字，改为面板内横向滚动 |
+| Web 样式：控制条 / 工具条 / toast | 修改 | `web/style.css` | `.recording-control`、`.danmaku-toolbar`、`.file-header` 加 `flex-wrap:wrap`；`.toast` 定位改 `max(24px, env(safe-area-inset-bottom/right))`；`.inline-form input[type="text"]` 改可收缩的 `flex:1 1 160px; min-width:0` |
+| Web 前端逻辑与测试 | **零改动** | `web/app.js`、`tests/frontend/*.mjs` | 纯 CSS/HTML 改动，不涉及 JS 行为面；既有前端套件无需新增用例（无新增 DOM 契约） |
+| Python 侧（录制链路 / Web 后端 / 配置 / i18n） | **零改动** | 无 | 本次未触碰任何 `.py`、依赖清单、配置文件与四语目录 |
+
+**二、根因明细（按问题编号，均来自两机型截图比对 + 样式表核对）**
+
+1. **顶栏溢出（主因，两机型共现）**：`.topbar` 固定 `height:56px`、单行 flex 不换行，`.brand` 又带 `white-space:nowrap`，
+   「品牌 + 5 个标签页 + 语言下拉 + 主题按钮」的最小内容宽超过两机视口 → flex 子项被压扁：截图里「仪表盘」竖排折字、
+   右侧主题按钮裁出屏幕右缘，顶栏整体溢出并引发整页横向滚动。处置见模块表第 2 行。
+2. **安全区缺失**：viewport 无 `viewport-fit=cover`、全样式未用 `env(safe-area-inset-*)` → 灵动岛、圆角与 Home Indicator
+   会遮挡顶栏内容与右下角 toast，横屏时左右两侧同样被裁。
+3. **`100vh` 视口高度**：`body{min-height:100vh}` 在移动端地址栏收展时不跟随动态视口，表现为底部被工具栏遮挡 / 布局跳动，
+   改为 `100dvh`（旧浏览器回退 `100vh`）。
+4. **仪表盘「正在录制」表无滚动兜底**：5 列 auto 布局在窄屏按 min-content 撑破 `.panel`，「设置画质 / 实际画质」列头竖排折字、
+   行高参差。处置为「面板内滚动 + 保底宽度」，与 `#rooms-view` 既有的 `table-layout:fixed` 定宽方案**并存不冲突**
+   （后者作用域仍严格限定在 `#rooms-view`，其注释约束③未被放宽）。
+5. **控制条 / 工具条不换行**：`.recording-control` 的状态文本与两个按钮、`.danmaku-toolbar` 的标题与筛选下拉在窄屏互相挤压，
+   加 `flex-wrap:wrap` 后换行而非压缩，触控目标保持完整。
+
+**三、验证**
+
+- `node --test tests/frontend/*.mjs` → **60 passed / 0 failed**（含 MIN-2241 根 `index.html` integrity / crossorigin 锁、
+  `parseConfigBool` 前端一致性锁等既有 60 条，本轮未新增、未删除用例）。
+- 行尾形态复核（改动后实测）：`web/style.css` CRLF=0 / LF-only=506（仍纯 LF）、
+  `web/index.html` CRLF=175 / LF-only=0（仍纯 CRLF）——两文件「原本为 0 的那项」改动后仍为 0，未混入相反形态的行。
+- Python 侧零改动，故本轮未跑 `pytest` / mypy / black / isort 全量门禁；`scripts/check_annotations.py` 不适用（未改 Python 文件）。
+
+**四、未实测与交回动作（诚实边界）**
+
+- 真机验证结果列：`SKIP(无真机 / 无远程调试通道)`。两机型视口读数（iPhone 16 Pro Max 440×956 CSS px、DPR 3；
+  Pixel 10 约 412 CSS px 宽、DPR ≈2.6）取自设备规格与截图推算，本机**未**做 Safari/Chrome 远程调试或真机截图复核。
+- 交回动作：清缓存后（Ctrl+F5）在真机或设备模拟器上按四项要点确认——顶栏两行完整可见且标签页可横向滑动、
+  页面整体无横向滚动条、灵动岛/Home Indicator 不遮挡顶栏与 toast、三张数据表在面板内横向滚动可看全列。
+- 完成定义第 2 步（真机验证）不适用于纯前端样式改动（不涉及录制链路 / 选源 / ffmpeg 参数 / 平台解析），
+  但上述四项要点须由用户真机确认后才算闭环。
 
 ### v4.3.0-dev (2026-09-27) — 本日改动按模块分类总览：发布链四处修复 + finding 4/5/6 + 四文档体积整理 + AGENTS 精简 + 元数据一致性同步
 

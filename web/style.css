@@ -48,7 +48,13 @@ body {
     font-family: "Microsoft YaHei UI", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--bg);
     color: var(--text);
+    /* 移动端防 Safari 横竖屏切换时自动放大字号导致布局漂移 */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    /* 100dvh：移动浏览器地址栏收展时 100vh 会大于/小于可视高度（底部被工具栏遮挡或跳动），
+       dvh 跟随动态视口；旧浏览器不认识 dvh 时回退到上一行 100vh。 */
     min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
 }
@@ -58,14 +64,20 @@ body {
     align-items: center;
     background: var(--card);
     border-bottom: 1px solid var(--border);
-    padding: 0 20px;
-    height: 56px;
+    /* 安全区：viewport-fit=cover 下顶栏延伸进状态栏/刘海区域，内容用 env(safe-area-inset-*)
+       推回可交互区（灵动岛机型顶部、横屏左右侧）；env() 不被支持时按 0 处理，等于原 padding。 */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: max(20px, env(safe-area-inset-left));
+    padding-right: max(20px, env(safe-area-inset-right));
+    min-height: 56px;
     gap: 24px;
 }
 
 .brand { font-weight: 700; font-size: 16px; color: var(--primary); white-space: nowrap; }
 
-.tabs { display: flex; gap: 4px; flex: 1; }
+/* min-width:0 允许 tabs 在 flex 行内收缩出横向滚动条，而不是把整条 topbar 撑出视口 */
+.tabs { display: flex; gap: 4px; flex: 1; min-width: 0; }
 .tab {
     background: transparent;
     border: none;
@@ -79,7 +91,7 @@ body {
 .tab:hover { background: var(--primary-soft); color: var(--primary); }
 .tab.active { background: var(--primary); color: #fff; }
 
-.topbar-right { display: flex; gap: 8px; align-items: center; }
+.topbar-right { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 .topbar-right button {
     background: transparent;
     border: 1px solid var(--border);
@@ -101,7 +113,16 @@ body {
 }
 .topbar-right select:focus { outline: 1px solid var(--primary); }
 
-.view { flex: 1; padding: 20px; max-width: 1200px; width: 100%; margin: 0 auto; }
+/* 安全区：主内容区左右留出刘海/圆角横屏 inset；env() 为 0 时等价于原 20px */
+.view {
+    flex: 1;
+    padding: 20px;
+    padding-left: max(20px, env(safe-area-inset-left));
+    padding-right: max(20px, env(safe-area-inset-right));
+    max-width: 1200px;
+    width: 100%;
+    margin: 0 auto;
+}
 /* .hidden 用 !important 确保它在任何视图/元素上都能强制隐藏，压过组件自身的 display 规则；
    轮询与视图切换全靠增删 .hidden 控制显隐，故必须不可被其他规则意外覆盖。 */
 .hidden { display: none !important; }
@@ -262,8 +283,9 @@ button.small { background: var(--primary-soft); color: var(--primary); border: n
 
 .toast {
     position: fixed;
-    bottom: 24px;
-    right: 24px;
+    /* 安全区：iPhone Home Indicator / 圆角底部会把贴边 24px 的 toast 压住，max() 保证至少 24px 且让出 inset */
+    bottom: max(24px, env(safe-area-inset-bottom));
+    right: max(24px, env(safe-area-inset-right));
     padding: 12px 20px;
     border-radius: 6px;
     color: #fff;
@@ -291,6 +313,7 @@ button.small { background: var(--primary-soft); color: var(--primary); border: n
 .recording-control {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;  /* 窄屏（iPhone 16 Pro Max 440px / Pixel 10 412px）下状态文本与两按钮放不下一行，换行而非互相挤压 */
     gap: 12px;
     background: var(--card);
     border: 1px solid var(--border);
@@ -317,12 +340,47 @@ button.small { background: var(--primary-soft); color: var(--primary); border: n
 .recording-control button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* 响应式断点：窄屏(≤768px)下把仪表盘卡片从 4 列降到 2 列、配置行从两栏变单栏，
-   配置提示改占第 1 列；标签页允许横向滚动以免溢出被裁切。无更大断点，移动端即按此布局。 */
+   配置提示改占第 1 列；标签页允许横向滚动以免溢出被裁切。无更大断点，移动端即按此布局。
+   移动端实测（iPhone 16 Pro Max 视口 440×956 CSS px / DPR 3，Pixel 10 视口 412×915 / DPR 2.6）：
+   顶栏单行放不下「品牌 + 5 个标签 + 语言下拉 + 主题按钮」，fixed 56px 高度被竖排折字撑破、
+   右侧按钮裁出屏幕——故拆成两行：第一行品牌+右侧控件，第二行标签页整行横向滚动。 */
 @media (max-width: 768px) {
+    .topbar {
+        flex-wrap: wrap;
+        row-gap: 2px;
+        padding-top: calc(6px + env(safe-area-inset-top));
+        padding-bottom: 6px;
+    }
+    /* 标签页换到第二行独占整宽，横向滚动消费溢出，不再挤压品牌与右侧控件 */
+    .tabs {
+        order: 3;
+        flex: 1 1 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab { padding: 8px 12px; flex-shrink: 0; }
+    .topbar-right { margin-left: auto; }
+
     .stat-cards { grid-template-columns: repeat(2, 1fr); }
     .config-row { grid-template-columns: 1fr; }
     .config-hint { grid-column: 1; }
-    .tabs { overflow-x: auto; }
+
+    /* 数据表（仪表盘「正在录制」5 列、弹幕房间 8 列、文件 5 列）在窄屏按 min-content
+       撑破 .panel 宽度：给表格保底宽度、面板内横向滚动，列头不再被压成竖排字。
+       注意：这是「面板内滚动」兜底，不要与 #rooms-view 的 table-layout:fixed 定宽方案混淆
+       （两者叠加无害，rooms 视口下方有自己的 min-width:640px 规则优先生效）。 */
+    .panel { overflow-x: auto; }
+    #dashboard-view .data-table,
+    #danmaku-view .data-table,
+    #files-view .data-table { min-width: 540px; }
+
+    .danmaku-toolbar { flex-wrap: wrap; }
+    .danmaku-toolbar select { max-width: 100%; }
+    .file-header { flex-wrap: wrap; }
+    /* 行内表单的地址输入框 200px 最小宽在 412px 视口会挤出按钮，放宽为可收缩 */
+    .inline-form input[type="text"] { flex: 1 1 160px; min-width: 0; }
 }
 
 /* ===== 弹幕监控 ===== */

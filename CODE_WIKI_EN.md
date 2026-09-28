@@ -774,6 +774,13 @@ NETEASE_QUALITY_MAP = {"blueray": "OD", "ultra": "UHD", "high": "HD", "standard"
 - `index.html` - single-page application entry (dashboard / rooms / config three views)
 - `app.js` - frontend logic (Token auth, API calls, SSE log stream, status rendering)
 - `style.css` - stylesheet (light/dark theme, responsive layout, downgrade highlight)
+- **Mobile adaptation conventions (2026-09-29)**: the viewport in `index.html` carries `viewport-fit=cover`; top and
+  side padding always goes through `env(safe-area-inset-*)` (Dynamic Island and Home Indicator clearance) and page
+  height uses `100dvh` (with `100vh` kept only as a fallback); under the <=768px breakpoint the top bar splits into two
+  rows (row 1: brand + language/theme, row 2: tabs on a full-width horizontal scroller) and data tables scroll
+  horizontally inside `.panel` (minimum width `540px`). New panels, columns or interactive controls must follow these
+  three rules (relative units + wrappable flex + safe area); the constraints and verification readings live in the
+  2026-09-29 entry of the Changelog.
 
 **Recording table display**:
 
@@ -1603,6 +1610,71 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > Scripts: `tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`
 > (`python file.py <URL> [seconds]`; requires a live room + network; manual channel by default).
 > **Rolling archive**: this section keeps only the current release window; older entries live verbatim in [`docs/changelog/code-wiki-history-en.md`](docs/changelog/code-wiki-history-en.md) (rule stated in the "Changelog Archive Index" above).
+
+### v4.4.0-dev (2026-09-29) — Web panel mobile fix: two-row top bar + safe-area / `dvh` adaptation + in-panel table scrolling, removing clipping and horizontal page scroll on iPhone 16 Pro Max and Pixel 10
+
+> This section is the **module-level overview** of this change (module table + root-cause detail + verification
+> readings). Only the Web frontend static assets are touched (`web/index.html` + `web/style.css`); the Python side
+> is unchanged and **nothing was deleted** - no rule, element or file was removed, existing comments are all
+> preserved under the "add only, never rewrite" convention, and this round only adds rules and rewrites existing
+> declarations.
+
+**1. Changes classified by module (added / modified / removed + file paths)**
+
+| Module | Nature of change | Main files | Key change / judgement |
+| --- | --- | --- | --- |
+| Web page skeleton | Modified, 1 place | `web/index.html` | viewport meta gains `viewport-fit=cover` - without it `env(safe-area-inset-*)` is always 0, so safe-area adaptation cannot take effect at all |
+| Web styles: top bar | Modified (layout constraints rewritten) | `web/style.css` | `height:56px` -> `min-height:56px`; padding on all four sides becomes `max(20px, env(safe-area-inset-*))`; `.tabs` gains `min-width:0`; under the <=768px breakpoint it wraps into two rows (row 1: brand + language/theme, row 2: tabs on a full-width horizontal scroller) |
+| Web styles: main content | Modified + added | `web/style.css` | `.view` left/right padding routed through the safe-area insets; `body` gains `min-height:100dvh` (the original `100vh` stays as fallback) and `text-size-adjust:100%` against landscape font inflation |
+| Web styles: data tables | Added | `web/style.css` | Under the <=768px breakpoint `.panel{overflow-x:auto}` plus `min-width:540px` for the dashboard / danmaku / files tables - headers are no longer squeezed into vertical single-character columns, they scroll inside the panel instead |
+| Web styles: control bar / toolbars / toast | Modified | `web/style.css` | `.recording-control`, `.danmaku-toolbar` and `.file-header` gain `flex-wrap:wrap`; `.toast` positioning becomes `max(24px, env(safe-area-inset-bottom/right))`; `.inline-form input[type="text"]` becomes a shrinkable `flex:1 1 160px; min-width:0` |
+| Web frontend logic and tests | **Untouched** | `web/app.js`, `tests/frontend/*.mjs` | CSS/HTML-only change with no JS behavioural surface; the existing frontend suite needs no new case (no new DOM contract) |
+| Python side (recording chain / Web backend / config / i18n) | **Untouched** | none | No `.py` file, dependency list, config file or catalog was touched this round |
+
+**2. Root-cause detail (numbered; each comes from comparing the two device screenshots against the stylesheet)**
+
+1. **Top-bar overflow (the main cause, present on both devices)**: `.topbar` had a fixed `height:56px` and a single
+   non-wrapping flex row while `.brand` also carried `white-space:nowrap`, so the minimum content width of
+   "brand + five tabs + language select + theme button" exceeded both viewports. The flex children were squeezed -
+   in the screenshots "仪表盘" broke into vertical characters and the right-hand theme button was clipped off screen -
+   and the whole top bar overflowed, producing page-level horizontal scrolling. Fix: row 2 of the module table.
+2. **Missing safe-area adaptation**: no `viewport-fit=cover` in the viewport meta and no `env(safe-area-inset-*)`
+   anywhere in the styles, so the Dynamic Island, the rounded corners and the Home Indicator obscured top-bar content
+   and the bottom-right toast, and landscape clipped both sides.
+3. **`100vh` viewport height**: `body{min-height:100vh}` does not follow the dynamic viewport when the mobile address
+   bar collapses or expands, which shows up as the bottom being covered by the browser toolbar or the layout jumping;
+   replaced with `100dvh` (old browsers fall back to the `100vh` line above it).
+4. **No scroll fallback for the dashboard "now recording" table**: a five-column auto layout breaks out of `.panel`
+   at min-content width on narrow screens, so the "设置画质 / 实际画质" headers collapse into vertical characters and
+   row heights diverge. Fix is in-panel scrolling plus a minimum width, which **coexists** with the existing
+   `table-layout:fixed` scheme of `#rooms-view` - the latter's scope is still strictly `#rooms-view` and its comment
+   constraint (3) was not relaxed.
+5. **Control bar / toolbars do not wrap**: the state text plus two buttons in `.recording-control`, and the heading
+   plus filter select in `.danmaku-toolbar`, squeezed each other on narrow screens; `flex-wrap:wrap` makes them wrap
+   instead of compress, keeping touch targets intact.
+
+**3. Verification**
+
+- `node --test tests/frontend/*.mjs` -> **60 passed / 0 failed** (the 60 existing cases including the MIN-2241 root
+  `index.html` integrity / crossorigin lock and the frontend `parseConfigBool` consistency lock; no case added or removed).
+- Line-ending check (measured after the change): `web/style.css` CRLF=0 / LF-only=506 (still pure LF),
+  `web/index.html` CRLF=175 / LF-only=0 (still pure CRLF) - on both files the side that was 0 is still 0 afterwards,
+  with no opposite-form lines mixed in.
+- The Python side is unchanged, so this round did not run the `pytest` / mypy / black / isort gate set;
+  `scripts/check_annotations.py` does not apply (no Python file touched).
+
+**4. Not measured and handed back (honest boundary)**
+
+- Live-device verification column: `SKIP(no physical device / no remote debugging channel)`. The two viewport
+  readings (iPhone 16 Pro Max 440x956 CSS px at DPR 3; Pixel 10 about 412 CSS px wide at DPR ~2.6) come from device
+  specifications and the screenshots; no Safari/Chrome remote debugging or on-device re-screenshot was performed here.
+- Hand-back action: after a hard refresh (Ctrl+F5) confirm four points on a real device or device emulator - the two-row
+  top bar is fully visible and the tabs scroll horizontally, the page as a whole has no horizontal scrollbar, the
+  Dynamic Island / Home Indicator do not cover the top bar or the toast, and the three data tables can be scrolled
+  horizontally inside their panel to see every column.
+- Step 2 of the Definition of Done (live-device verification) does not apply to a CSS-only frontend change (no
+  recording chain / source selection / ffmpeg arguments / platform resolver involved), but the four points above must be
+  confirmed on a real device by the user before this change counts as closed.
 
 ### v4.3.0-dev (2026-09-27) — Today's changes classified by module: four release-chain fixes + findings 4/5/6 + the four-doc size pass + the AGENTS.md trim + metadata and consistency sync
 

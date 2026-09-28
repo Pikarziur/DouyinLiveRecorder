@@ -74,7 +74,7 @@ docker compose --profile web up -d
 
 # 或本地构建并启动
 docker build -t douyin-live-recorder .
-docker run -d -v ./config:/app/config -v ./downloads:/app/downloads douyin-live-recorder
+docker run -d -v ./config:/app/config -v ./downloads:/app/downloads -v ./logs:/app/logs -v ./backup_config:/app/backup_config douyin-live-recorder
 ```
 
 > 容器内 FFmpeg 与 Node.js 由镜像自带（apt 安装），无需挂载本地 `ffmpeg/`、`node/` 目录；

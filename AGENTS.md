@@ -162,7 +162,7 @@ python build_exe.py --smoke      # 打包 + 冒烟测试
 python build_exe.py --no-zip     # 只打包不压缩
 python build_exe.py --no-runtime # 跳过 ffmpeg/node（减小体积）
 python build_exe.py --dual       # 同时生成 lite + full 两个 zip
-docker build --build-arg APP_VERSION="$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" -t douyin-recorder .
+docker build --build-arg APP_VERSION="$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" -t douyin-live-recorder .
 docker compose up -d
 ```
 
