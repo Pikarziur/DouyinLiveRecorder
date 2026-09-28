@@ -1,15 +1,15 @@
 # AGENTS.md — DouyinLiveRecorder 核心约定
 
-> 本文件是项目长期约定的**唯一事实源**：编码规范、架构决策、并发/线程模型、测试编写规则、构建与格式化流程、以及所有「已知坑」均已在此收敛。新增长期性约定请直接写回本文件对应章节。
+> 本文件是项目长期约定的**唯一事实源**：编码规范、架构决策、并发/线程模型、测试规则、构建与格式化流程、「已知坑」均在此收敛。新增长期约定写回对应章节，不得出现第二份事实源。
 >
-> **可达性约定**：纯参考性长段（项目结构目录树、一次性实测读数）已外迁到 `docs/agent-reference/` 并由本文件用链接指向；约定、门禁命令、风险控制、「已知坑」的约束句一律留在本文件内，不得出现第二份事实源。判定：「每次会话都必须遵守的约束」留根文件，「在哪找东西的清单 / 佐证读数」可外迁。
+> **可达性约定**：纯参考长段（目录树、一次性实测读数）外迁到 `docs/agent-reference/` 由此处链接指向；约束、门禁命令、风险控制、「已知坑」约束句一律留根文件。判定：每次会话必守的约束留根，「在哪找清单 / 佐证读数」可外迁。
 >
-> **阅读顺序**：先读「风险控制（前置）」→ 需要跑门禁时读「格式化命令」→ 动手前读所在主题的「已知坑」条目。
+> **阅读顺序**：先读「风险控制（前置）」→ 跑门禁时读「格式化命令」→ 动手前读所在主题的「已知坑」。
 
 ## 项目概览
 
 - **名称**: DouyinLiveRecorder
-- **版本**: 4.4.0（唯一事实源 `pyproject.toml` 的 `version`，各消费方动态读取的完整口径见「关键约定」第 1 条）
+- **版本**: 4.4.0（唯一事实源 `pyproject.toml` 的 `version`，动态读取口径见「关键约定」#1）
 - **描述**: 支持抖音、TikTok、YouTube、快手等 60+ 平台的直播录制工具
 - **许可证**: MIT
 
@@ -38,40 +38,20 @@
 
 ## 代码风格
 
-> 以下 Black / isort / mypy 三段 TOML 是 `pyproject.toml` 中 `[tool.*]` 的摘录；配置本体才是事实源。
+> Black / isort / mypy 取值摘录自 `pyproject.toml [tool.*]`，配置本体才是事实源；门禁命令见「格式化命令」。
 
 ### Black
 
-```toml
-line-length = 120
-target-version = ['py314']
-include = '\.pyi?$'
-```
-
-排除目录: `.git`, `.venv`, `build`, `dist`, `__pycache__`, `.pyc`, `node`, `ffmpeg`, `downloads`, `logs`
-
+- **取值**: `line-length = 120`、`target-version = ['py314']`、`include = '\.pyi?$'`；排除 `.git`/`.venv`/`build`/`dist`/`__pycache__`/`.pyc`/`node`/`ffmpeg`/`downloads`/`logs`。
 - **except 多异常写法**: 本仓统一写 `except A, B:`（不带括号，PEP 758，依赖 ≥3.14）。两种写法 black 均接受，统一无括号是**风格约定，不是门禁强制**；新增/修改代码写无括号，**存量带括号写法不要为对齐而批量改动**（会造成无意义 diff）。需要 `as` 绑定时必须回退加括号（`except (A, B) as e:`）。不要为兼容 <3.14 而加括号。
 
 ### isort
 
-```toml
-profile = "black"
-line_length = 120
-known_first_party = ["src", "i18n"]
-```
-
-排除目录: `.git`, `node`, `ffmpeg`, `downloads`, `__pycache__`, `*.pyc`
+- **取值**: `profile = "black"`、`line_length = 120`、`known_first_party = ["src", "i18n"]`；排除 `.git`/`node`/`ffmpeg`/`downloads`/`__pycache__`/`*.pyc`。
 
 ### mypy
 
-```toml
-python_version = "3.14"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-ignore_missing_imports = true
-```
-
+- **取值**: `python_version = "3.14"`；`warn_return_any`/`warn_unused_configs`/`disallow_untyped_defs`/`ignore_missing_imports` 均为 `true`。
 - **不带路径参数**：检查范围由 `pyproject.toml [tool.mypy].files` 定义（src/ + 根入口 + build_exe.py + scripts/ + tests/）。显式传参（如 `mypy src/`）会**覆盖**该配置只查 src/；排障可收窄，但**门禁结果以无参数跑法为准**。早期只查 src/ 时根入口漏 import（gui.py 的 `logger`/`session_id` 运行时 NameError）长期逃逸。
 - **平台符号门控双跑同样不带路径**：见「已知坑」平台专属符号条目。
 
@@ -94,8 +74,6 @@ ignore_missing_imports = true
 - **「更正考古」段可压缩**：多层叠加的修订段落允许压为「当前实测状态 + 一行 `[历史注]`」，但实测读数、主机名/URL、常量名、环境变量名、平台名、判据、并发与时序假设、错误码、真实存在的回归锁用例名一律逐字保留。
 
 ### 注释检查工具（scripts/check_annotations.py）
-
-三模式：
 
 | 命令 | 用途 |
 | --- | --- |
@@ -129,23 +107,16 @@ ignore_missing_imports = true
 ## 依赖管理
 
 - **运行时依赖**: `pyproject.toml [project.dependencies]` 与 `requirements.txt` 保持同步（23 条，2026-09-26 复核：`h2`/`socksio` 于 2026-09-23 补入后由 21→23，两侧包名集合逐项相等）。
-- **开发 / 构建 / GUI 依赖**: `pip install .[dev]`（pytest/black/isort/mypy）/`.[build]`（PyInstaller>=6.10.0）/`.[gui]`（customtkinter/pystray/Pillow）；三者均不进运行时清单，故 `requirements.txt` 只有 23 条运行时依赖。
+- **开发 / 构建 / GUI 依赖**: `pip install .[dev]`（pytest/black/isort/mypy）/`.[build]`（PyInstaller>=6.10.0）/`.[gui]`（customtkinter/pystray/Pillow）；三者均不进运行时清单。
 - **i18n 依赖**: PyYAML（zh_TW.yaml 加载；缺失时仅损失 YAML 格式）。
 - **版本下限（须与 `requirements.txt` 和 `pyproject.toml [project.dependencies]` 三处一致）**: `pystray>=0.19.5`、`Pillow>=12.3.0`、`customtkinter>=6.0.0`。
-- **安全下限（清单只写下限）**: 「声明区间内仍含已知受影响版本」是真实风险，只能靠抬高下限消除：`starlette>=1.3.1`（CVE-2026-48710 受影响 <=1.0.0；PYSEC-2026-2280/2281 修复于 1.1.0；PYSEC-2026-248/249 修复于 1.3.0/1.3.1——旧下限 1.0.1 自身仍在受影响段内，2026-09-21 已二次抬升）、`urllib3>=2.7.0`（显式声明，因是 requests 传递依赖且运行期同步出站 HTTP 穿过它，CVE-2026-44431）、`h2>=4.4.1`（PYSEC-2026-3628 / GHSA-6hr6-w5qg-qmwg，重复 Host 头致请求走私，OSV 区间 `introduced=0` / `fixed=4.4.1`；旧下限 4.3.0 自身落在受影响段——它只修了同源的 PYSEC-2026-1435，2026-09-26 由 `deps-audit`「下限复核」步抓出）。`python-multipart>=0.0.32`、`requests>=2.34.2` 均已高于修复版本。`pip-audit` 同属 CI 审计工具，**不得**进 `requirements.txt`/`[project.dependencies]`。新增/上调下限时跑一次 `deps-audit`。
+- **安全下限（清单只写下限，抬下限消除「声明区间含已知受影响版本」风险）**: `starlette>=1.3.1`（CVE-2026-48710 受影响 <=1.0.0；PYSEC-2026-2280/2281 修复于 1.1.0；PYSEC-2026-248/249 修复于 1.3.0/1.3.1，旧下限 1.0.1 仍在受影响段，2026-09-21 已二次抬升）、`urllib3>=2.7.0`（显式声明，requests 传递依赖且同步出站 HTTP 穿过它，CVE-2026-44431）、`h2>=4.4.1`（PYSEC-2026-3628 / GHSA-6hr6-w5qg-qmwg 重复 Host 头致请求走私，OSV `introduced=0`/`fixed=4.4.1`，旧下限 4.3.0 只修同源 PYSEC-2026-1435，2026-09-26 由 `deps-audit`「下限复核」抓出）。`python-multipart>=0.0.32`、`requests>=2.34.2` 均已高于修复版本。`pip-audit` 属 CI 审计工具，**不得**进 `requirements.txt`/`[project.dependencies]`。新增/上调下限时跑一次 `deps-audit`。
 - **前端测试零 Python/npm 依赖**: `tests/frontend/*.mjs` 用 Node 内置 `node:test`，只需系统 Node.js（与 JS 签名脚本共用运行时）。
 - **依赖缺失排查**: venv 缺 `brotli`/`protobuf` 等表现为**测试收集期** `ModuleNotFoundError`，先核对 `pip list` 与 `requirements.txt` 差异再怀疑代码；pip 走本地代理被拒时用 `HTTP_PROXY="" HTTPS_PROXY="" pip install --proxy "" <pkg>` 绕过（装完出现「目录破损」按「CI / workflow 约定」分级处置，不要直接重试 pip）。
 
 ## 测试
 
-```toml
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-asyncio_mode = "auto"
-```
-
+- **pytest 配置**（`pyproject [tool.pytest.ini_options]`）: `testpaths=["tests"]`、`python_files=["test_*.py"]`、`python_classes=["Test*"]`、`python_functions=["test_*"]`、`asyncio_mode="auto"`。
 - **质量门禁（须保持）**: `pytest`（0 警告）+ black/isort/mypy 三条（路径换成 `tests/`）+ `basedpyright tests/`（0 error/0 warning；basedpyright 为本地补充门禁）。
 - **pytest「0 警告」口径**: warnings summary 为空（0 条）。第三方库告警一律经 `pyproject.toml [tool.pytest.ini_options].filterwarnings` 显式 ignore 并附来源注释；**禁止用 filterwarnings 掩盖项目自身告警**，禁止给用例加宽泛过滤。协程类 RuntimeWarning 由 GC 延迟触发、ignore 拦不住——必须修根因（见「已知坑」跨循环关闭 AsyncClient）。
 - 覆盖率源码 `src/`、排除 `tests/`/`__pycache__/`/`node/`/`ffmpeg/` 等（与 `.gitignore`/`.dockerignore`/pyproject 同源）；门禁：`python scripts/check_coverage.py`（阈值事实源 `MODULE_THRESHOLDS`）。
@@ -220,7 +191,7 @@ docker compose up -d
 - **镜像额外排除集**（仅 `.dockerignore`）：`uv.lock`/`scripts/`/`AGENTS.md`/`README_EN.md`/`CODE_WIKI_EN.md`/`.coveragerc-concurrency` 及审查记录通配 `CODE_REVIEW_*.md`/`DIAGNOSIS_*.md`/`PERF_REVIEW_*.md`/`PROPOSAL_*.md`（随仓库分发，不得加进 `.gitignore`；换用新前缀必须三处同改）。
 - **门禁环境变量 `PYTHONUTF8=1`**: 见「格式化命令」MID-63 条目。
 - **`deps-audit` job**: `ci.yml` 中 `pip-audit -r requirements.txt`（按 OSV 审镜像与 CI 实际消费清单），独立成 job 且是 `ci-summary.needs` 的一部分（required check 唯一暴露面）。出现新公告优先抬下限而非 `--ignore-vuln` 白名单。本地复现须自带 `PYTHONUTF8=1`（中文 Windows 下 pip-audit 读中文注释行会 `UnicodeDecodeError`）。
-- **`static` job 的派生元数据一致性校验（`sync_metadata.py --check`）**: `uv.lock` 与 `DouyinLiveRecorder.egg-info` 是 `pyproject.toml` 的派生产物（见「关键约定」#1 与下方 egg-info 条目），不得手改版本字段。`ci.yml` 的 `static` job 在 `Check version consistency` 之后跑 `python scripts/sync_metadata.py --check`——纯读 `uv.lock`/`egg-info/PKG-INFO`/`pyproject.toml` 比对，**不调 uv/setuptools、不联网、无需装项目依赖**，与 `tests/test_regression_2026_09_22_gates.py` 两条元数据回归锁同口径（见「测试铁律」）；路径过滤已把 `uv.lock`/`DouyinLiveRecorder.egg-info/**` 纳入 `python` 组，手动改这两个文件也会触发本步。漂移修复：`python scripts/sync_metadata.py` 重新生成。
+- **`static` job 的派生元数据一致性校验（`sync_metadata.py --check`）**: `uv.lock` 与 `DouyinLiveRecorder.egg-info` 是 `pyproject.toml` 的派生产物（见「关键约定」#1 与下方 egg-info 条目），不得手改版本字段。`ci.yml` 的 `static` job 在 `Check version consistency` 之后跑 `python scripts/sync_metadata.py --check`——纯读 `uv.lock`/`egg-info/PKG-INFO`/`pyproject.toml` 比对，**不调 uv/setuptools、不联网、无需装项目依赖**，与 `tests/test_regression_2026_09_22_gates.py` 两条元数据回归锁同口径；路径过滤已把 `uv.lock`/`DouyinLiveRecorder.egg-info/**` 纳入 `python` 组，手动改这两个文件也会触发本步。漂移修复：`python scripts/sync_metadata.py` 重新生成。
 - **发布链运行时钉定在 prepare 单点收敛（SEV-10）**: 钉定值事实源是 `build_exe.py`，不得把哈希副本写进 workflow（见「已知坑」发布钉定条目）。
 - **build 失败会留下空 Release，须由 `release-guard` 回收（2026-09-27）**: `build-release.yml` 的 `release-create` 为消除三平台并发创建竞态，在 build **之前**预建 Release 记录；任一平台 build 失败（典型：`_download_file` 的 SHA256 校验 `SystemExit` → `dist/` 无 zip → 上传步骤报 `Pattern 'dist/*-lite.zip' does not match any files`）时，收尾 `release` job 因 `needs: build` 被跳过，那条记录就以**空 Release** 留在仓库里。`release-guard`（`needs: [prepare, build]`、`if: always() && ... && needs.build.result != 'success'`）按「残缺即不发布」删除它并留 warning；`gh release delete` 默认**不删 tag**，修好后重跑工作流即可重新发布。不得为「让流水线变绿」给上传步骤关掉 `fail_on_unmatched_files`——那条红是产物缺失的唯一可见信号。
 
@@ -441,13 +412,12 @@ find . -name "*.isorted" -delete
 
 ### 类型检查、注释与静态门禁
 
-- **PEP 758 `except A, B:` 在 3.14 合法，语法/编译检查一律用项目 venv 的 Python 3.14**: 用 3.13 做 `compileall`/`py_compile` 会把全树误报 `SyntaxError: multiple exception types must be parenthesized`。新增/修改写无括号，但不要把现有无括号写法修回加括号（与约定相反）。
+- **PEP 758 `except A, B:` 在 3.14 合法，语法/编译检查一律用项目 venv 的 Python 3.14**: 用 3.13 做 `compileall`/`py_compile` 会把全树误报 `SyntaxError: multiple exception types must be parenthesized`。新增/修改写无括号，但不要把现有无括号写法修回加括号（与约定相反）。**不支持 `as` 绑定**：有异常对象时必须 `except (A, B) as e:`（语法强制），批量替换时务必 grep `as` 用法（与「代码风格」except 条目同口径）。
 - **protoc 生成模块需手写 `.pyi` 存根**（src/proto/douyin_pb2.py）: 消息类经动态注入，mypy 看不到 `PushFrame`/`Response`/`ChatMessage` 属性而报 `attr-defined`。已建 `src/proto/douyin_pb2.pyi` 声明 3 个消息类及字段（继承 `google.protobuf.message.Message`）。新增字段引用必须同步补存根。
 - **平台专属符号必须 `sys.platform` 字面量门控**（mypy 跨平台 CI 检查）: `ctypes.WinDLL`/`windll` 仅 Windows typeshed 有，CI 的 mypy 跑在 linux runner。修复模式：函数体首行早返回 `if sys.platform != "win32": return`；注解需引用平台符号时降级为 `object | None`（禁 `sys.platform` 条件类型别名）。**禁用 `# type: ignore`**（Linux 必要、Windows 多余，basedpyright 报 `reportUnnecessaryTypeIgnoreComment`）。验证双跑且均不带路径：`mypy`+`mypy --platform linux`。门控条件写反静态检查发现不了，须运行时用例锁定（`tests/test_i18n.py::TestWindowsUiLanguagePlatformGate`）。
 - **三参 `getattr` 不做字面量名解析，模块级已声明属性一律直接访问**（mypy Any 泄漏）: `getattr(obj, "attr", default)` 返回 `Any | None`，`warn_return_any` 下报 `no-any-return` 且后续属性链类型检查全部失效。凡目标属性有模块级声明（如 `main.scheduler: ConcurrencyScheduler | None`）直接 `main.scheduler` 访问；确需容错用 `cast`。
 - **protobuf 升级必须先同代重新生成再放开版本上限**（F-14）: `douyin_pb2.py` 为 protoc 25.x 产物、标注 DO NOT EDIT，本环境无 protoc。**禁止手改生成文件**；声明区间现为 `protobuf>=6.33.5,<8`——**上限 `<8` 不可删**（gencode 4.25.3 与 runtime 跨大版本存在兼容窗口外失效风险），下限 2026-09-26 由 `deps-audit`「下限复核」从 `6.31.1` 抬到 `6.33.5`（PYSEC-2026-1805 影响 6.31.1，修复于 5.29.6 / 6.33.5，旧下限自身就在受影响段内）。事实源是 `pyproject.toml [project.dependencies]` 与 `requirements.txt`，本文件不复述取值以外的规格。回归锁：`tests/test_proto_runtime_compat.py`。
 - **`main.py` 内引用模块全局量不得加 `main.` 前缀**: 本文件模块级 `main` 是入口函数而非模块对象，`main.recording_enabled` 运行期必抛 `AttributeError`。
-- **PEP 758 的 `except A, B:` 不支持 `as` 绑定**: 有异常对象时必须 `except (A, B) as e:`（语法强制），与「不要为兼容 <3.14 加括号」不冲突（前者风格、此处语法）。批量替换时务必 grep `as` 用法。
 - **删除模块级函数/常量前必须 grep 全部调用点**: `main.py` 曾删 `_ffmpeg_reported_output_failure()` 但留调用点，mypy/basedpyright/tests 三面同时转红，且因调用点在 `and` 右侧短路、在 Linux CI 上恰不炸（典型「本地红、CI 绿」）。执行「删除符号」改动：① grep 收全调用点再删；② 删完立刻跑 mypy+完整 pytest；③ 用例输出路径必须用 `tempfile.gettempdir()`（旧 `"/tmp/out.ts"` 在 Windows 父目录不存在，两端语义相反）。`check_annotations.py` 已常驻符号可达性检查兜底。
 - **测试桩转发函数里 `*args`/`**kwargs` 一律注解 `Any`（写成 `object` 只有 basedpyright 报错）**: `monkeypatch.setattr(Path, "unlink", stub)` 类转发桩若 `*a: object, **k: object` 转发，basedpyright 会按声明类型逐个匹配形参报 `reportArgumentType`；mypy 不报故只跑 mypy 会漏。统一 `*args: Any, **kwargs: Any`（必要时 `cast` 收窄返回值）。
 - **CI 的 typecheck job 必须装 pytest，否则 `tests/` 的类型检查是半盲的**（2026-09-26 修）: 该 job 若只装 `requirements.txt + mypy`，`tests/` 里的 `pytest.*` 全按 `Any` 检查——fixture / `MonkeyPatch` 免检不说，`pytest.fail()` 的 `NoReturn` 也丢失，于是「声明了非 `None` 返回类型、却以 `pytest.fail()` 收尾」的辅助函数被判成 `[return]`（`tests/test_proto_runtime_compat.py::_declared_protobuf_specifier` 实测只在 CI 红、本机恒绿，无法本地复现）。现随 consts 补装固定版本 `pytest==9.1.1`（与 black / isort / mypy 同口径，防「代码未改动却 CI 变红」）。长期约定：辅助函数走不到终点时统一 `raise AssertionError(...)`（天然 `NoReturn`，不依赖 pytest 是否可见），**不要**依赖 `pytest.fail()` 的返回类型，**也不要**在其后补不可达语句（basedpyright 报 `reportUnreachable`）。复现「pytest 不可见」的老环境：`mypy --no-site-packages`（该模式下 `src/` 多出的 5 条 `no-any-return` 属过度剥离噪声，非真实问题）。
@@ -463,7 +433,7 @@ find . -name "*.isorted" -delete
 - **近期性能优化与修复完整变更记录见 `CODE_WIKI.md`/`CODE_WIKI_EN.md` 更新日志**: 本文件只沉淀可回归硬约定。
 - **`StopRecording.vbs` 必须保存为 UTF-16 LE（带 BOM）**: 由 wscript/cscript 消费，按系统 ANSI 解释 `.vbs`，UTF-8 保存会让中文乱码（源文件统一 UTF-8 约定不适用于该文件）。进程匹配现为三层：① 程序专属 exe 按映像名命中；② python 须命令行含入口脚本或 pip 启动器名 `douyin-recorder`（刻意不按项目目录匹配，避免误杀编辑器工具进程）；③ ffmpeg 须「父进程为已识别录制主进程」或「路径/命令行锚定程序目录」。结束顺序先录制主进程（`taskkill /f /t /pid` 连带子进程树）后残留 ffmpeg——原「先杀 ffmpeg→等 10s→再杀主进程」存在主进程重建 ffmpeg 竞态，且强杀不走 atexit 不执行日志归档（本脚本仅作最后手段）。
 - **包内 ffmpeg 的 PATH 前置在 Apple Silicon 上必须「让位」（W6）**: full 包内置 macOS ffmpeg 是 x86_64 静态构建，已装原生 arm64 用户会被遮蔽强制走 Rosetta。判据收敛到 `src/ffmpeg_install.should_prepend_bundled_ffmpeg_dir()`（唯一事实源，main.py 只保留「重复插入跳过」守卫）。五条判据：`darwin` ∧ `arm64` ∧ 包内目录存在 ∧ 注入前 PATH 快照另有 ffmpeg ∧ 那份 realpath 不在包内目录。三条不可回退：① 探测必须用调用点传进来的 pre-injection PATH 快照（直接读 `os.environ["PATH"]` 会探到自己刚前置的那份）；② 自我遮蔽形态（用户已把包内目录永久写进 PATH）须按 realpath 归一后排除；③ Windows/Linux/Intel Mac 行为逐字不变。`scripts/douyin_live_recorder_standalone.py` 有同名同语义判据（该文件不 import src），改判据必须两处同改、两边注释互相点名，行为等价性由 `tests/test_ffmpeg_path_preference.py::test_twin_agrees_on_every_criterion_combination`（9 格矩阵）锁住。
-- **`DouyinLiveRecorder.egg-info` 是构建产物但会长期腐化，改 `pyproject.toml` 后须重建**: `importlib.metadata`/`pip install -e .` 会读它。重建（与 `uv lock` 一并）：`python scripts/sync_metadata.py`（CI 由 `ci.yml` 的 `static` job 跑 `python scripts/sync_metadata.py --check` 作秒级门禁，并由 `tests/test_regression_2026_09_22_gates.py` 两条元数据回归锁作 in-test 兜底）。改 `[project].dependencies`/`version`/`packages`/`package-data` 后应重跑；只校验不重建用 `python scripts/sync_metadata.py --check`。
+- **`DouyinLiveRecorder.egg-info` 是构建产物、会长期腐化，改 `pyproject.toml` 后须重建**: `importlib.metadata`/`pip install -e .` 会读它；改 `[project].dependencies`/`version`/`packages`/`package-data` 后跑 `python scripts/sync_metadata.py` 重建（与 `uv lock` 一并，口径见「关键约定」#1；CI 由 `static` job 跑 `--check` 作秒级门禁）。
 - **依赖对账必须先剥 `requirements.txt` 行内注释**: 注释紧贴版本号不带空格（如 `brotli>=1.2.0#b站弹幕解压`），整行比对会全量误报不一致；比对前 `line.split("#", 1)[0].strip()` 再归一化。egg-info 里 `protobuf` 规格被 setuptools 规范化成 `<8,>=6.33.5`（与 pyproject `>=6.33.5,<8` 顺序不同不是差异），应按「包名+规格集合」比对。
 - **排除目录归一化必须先剥 `**/` 再剥 `*/`**: basedpyright 用 `**/downloads`、coverage 用 `*/downloads/*`，若先剥 `*/` 会把 `**/downloads` 切成 `*downloads` 致「basedpyright 缺 7 个目录」假结论。
 - **发布链运行时二进制必须 fail-closed 钉定（SEV-10）**: full 版把 ffmpeg+node 打进对外分发 zip 并以子进程执行，危害半径是所有下载用户。三层防线缺一不可：① `build_exe.py` 的 `_PINNED_RUNTIME_SHA256`（按 `<os>-<arch>` 分列，槽位 ffmpeg/node），「已钉定」唯一判据是 `_is_pinned()` 形状（64 位小写十六进制），占位/空串/截断一律未钉定，**不得为让 CI 绿回填本地自算哈希**（那是固化「构建机已中毒」）；② `--require-pinned`（CI 因 `GITHUB_ACTIONS=true` 自动开），缺钉定即在下载前 `SystemExit`（该异常继承 BaseException 吞不掉），`slot` 是必填关键字参数（漏传会静默降级为无校验下载）；③ `scripts/check_runtime_pins.py`（`--strict` 由 build-release.yml prepare job 执行并 `--emit-env` 透传 `DLR_RUNTIME_SHA256`），表为空/缺平台/缺槽位一律 rc=2。「算满足」两档的唯一口径是 `build_exe._slot_is_gated()`（`check_runtime_pins.py` 不得自判）：64 位十六进制官方哈希，或**官方签名档**（取值 = `OFFICIAL_SIGNATURE_PIN`，且该槽在 `_RUNTIME_GPG_SIGNATURES` 确有登记、指纹为 40 位十六进制；**标记本身绝不构成放行**，与第 4 类同一道防线）。**Linux 取数端点必须是 `releases/tags/<月末 autobuild 标签>`，不得用 `releases/latest` 或日更 autobuild 标签**：`latest` 是滚动别名（同名资产被上游重发即换 digest），日更标签上游只保留约两周（钉它等于预埋一次 404），月末标签才是 URL 与 digest 双双不可变的组合。逐条取数命令、实测读数与当前钉定进度见 [`docs/agent-reference/measured-evidence.md`](docs/agent-reference/measured-evidence.md)「运行时上游完整性产物实测」，本文件不再复制数值。回归锁 `tests/test_build_exe.py::test_linux_ffmpeg_urls_pin_an_immutable_release_tag`（禁 `/releases/download/latest/`、禁 `n9.0-latest-` 资产名、两架构必须同一标签）。macOS 两槽 ffmpeg 走官方签名档（evermeet 不公布哈希，验签即该槽唯一判据）。node 版本按最新 LTS 动态解析，上游发新 LTS 即钉定失效拦下发布——刻意人工闸口，不得改自动取哈希。[历史注] macOS/Linux 四个 ffmpeg 槽位曾刻意保持占位，因当时所选上游确实不公布 SHA256。
