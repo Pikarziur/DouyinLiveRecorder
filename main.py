@@ -764,8 +764,10 @@ def direct_download_stream(
 
                     for chunk in response.iter_bytes(chunk_size):
                         if live_url in url_comments or exit_recording or not recording_enabled:
+                            # f-string 直传 print_colored 提取器扫不到（盲区①），先查表后插值才能被目录命中
                             color_obj.print_colored(
-                                f"[{record_name}]录制时已被注释或停止录制,下载中断", color_obj.YELLOW
+                                i18n.tr("[{record_name}]录制时已被注释或停止录制,下载中断", record_name=record_name),
+                                color_obj.YELLOW,
                             )
                             clear_record_info(record_name, live_url)
                             _downloaded = downloaded
@@ -1345,7 +1347,11 @@ def check_subprocess(
                 _reached_record_limit = True
                 break
             if record_url in url_comments or exit_recording or not recording_enabled:
-                color_obj.print_colored(f"[{record_name}]录制时已被注释或停止录制,本条线程将会退出", color_obj.YELLOW)
+                # 同上：f-string 直传 print_colored 是提取盲区，改 tr 预格式化
+                color_obj.print_colored(
+                    i18n.tr("[{record_name}]录制时已被注释或停止录制,本条线程将会退出", record_name=record_name),
+                    color_obj.YELLOW,
+                )
                 # 本分支自行 clear_record_info + terminate + unregister，标记已收敛以免 finally 二次处理
                 _converged = True
                 clear_record_info(record_name, record_url)

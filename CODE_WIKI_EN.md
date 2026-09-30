@@ -1612,6 +1612,23 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > (`python file.py <URL> [seconds]`; requires a live room + network; manual channel by default).
 > **Rolling archive**: this section keeps only the current release window; older entries live verbatim in [`docs/changelog/code-wiki-history-en.md`](docs/changelog/code-wiki-history-en.md) (rule stated in the "Changelog Archive Index" above).
 
+### v4.4.0-dev (2026-09-30) — i18n blind-spot backfill batch: tr-ified user-visible text in extractor blind spots ①②③ + 16 entries registered across all four catalogs + zh_CN.mo recompiled
+
+**Call-site tr conversion (lookup before interpolation, eliminating "entry exists in the catalog but can never be matched at runtime")**
+
+- **print_colored (blind spot ①)**: two sites in `main.py` (download interrupted / thread exiting) and two in `src/notify.py` (push failure / removed from recording list) — f-strings passed straight in are now pre-formatted via `i18n.tr(constant template, **kw)` (same shape as MIN-2233).
+- **messagebox (blind spot ②)**: 10 sites in `gui.py` — 6 error bodies tr-ified (load/save config file failed, failed to start recording, failed to write URL_config.ini, room URL not found) plus 7 titles tr-ified (Error ×4 call sites, Failed to switch quality ×2, Success, Configuration file changed ×2, GUI startup failed), aligning with the MIN-2247 rule "titles and bodies both go through tr".
+- **Push text (blind spot ③)**: the push-title fallback `直播间状态更新通知` in `src/notify.py` goes through tr; the SMTP CRLF guard in `msg_push.py` now raises `tr("{kind} 含换行符，禁止用于邮件头", kind=tr(kind))` (the 4 kind labels are translated at the call sites); 6 push-failure `errmsg` fallbacks (`未知错误`) go through tr.
+
+**Four-catalog registration (16 new msgids)**: zh_CN identity (new section at the po tail + updated header dates); en_US/en_GB share the same English text (「」converted to double quotes); zh_TW traditional with terminology aligned to existing entries (配置文件→設定檔, 线程→線程, 消息→訊息, 注释→註釋). zh_TW also had **7 duplicated theme-section keys removed** (values identical; `界面主题` and 6 more were registered twice as a whole block; the earlier copy dropped) — all four catalogs are strictly key-set equal again (808 keys).
+
+**Regression lock**: `tests/test_i18n_migration.py` gains invariant ④ `test_no_valuable_fstring_in_print_colored_or_messagebox` — repo-wide scan banning interpolated f-strings in blind-spot argument positions + predicate self-check (tr pre-formatting / constants / dynamic non-template args must not be flagged); mutation-verified: reverting one site to an f-string turns the test red, then restored byte-for-byte with no residue.
+
+**Verification**
+
+- Gates: `run_gates.py` 8/8 green; full pytest 3690 passed / 14 skipped / 0 warnings; `check_coverage.py` all 44 modules meet thresholds (84.76%); basedpyright 0 error / 0 warning; `compile_po.py --check` .po/.mo in sync (.mo header N=809, i.e. 808 keys + 1).
+- i18n chain end-to-end: hot-switched through all four languages with `set_language`; all 16 new entries match via `.mo` (zh_CN) / JSON (en) / YAML (zh_TW), including a bilingual check of the SMTP-guard exception text (en_US/zh_TW). This batch only touches message plumbing — no recording-chain / source-selection / ffmpeg-argument / platform-resolver behaviour — so no live-room verification is required.
+
 ### v4.4.0-dev (2026-09-30) — P0 fix batch: landed `CODE_REVIEW_2026-09-30.md` Critical 2 + P0 six-pack (each with a regression lock)
 
 > Executed per the report's chapter 8 "P0 (fix immediately)"; P1 (install chain / HTTP bounds / test-line restoration) and P2 remain for later batches.

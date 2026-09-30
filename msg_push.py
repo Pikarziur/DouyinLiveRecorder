@@ -104,7 +104,7 @@ def dingtalk(url: str, content: str, number: str | None = None, is_atall: bool =
                     i18n.tr(
                         "钉钉推送失败, 推送地址：{masked_api}, {errmsg}",
                         masked_api=_mask_url(api),
-                        errmsg=resp_data.get("errmsg", "未知错误"),
+                        errmsg=resp_data.get("errmsg", i18n.tr("未知错误")),
                     )
                 )
         except Exception as e:
@@ -147,7 +147,7 @@ def xizhi(url: str, title: str, content: str) -> dict[str, list[str | int]]:
                     i18n.tr(
                         "微信推送失败, 推送地址：{masked_api}, 失败信息：{msg}",
                         masked_api=_mask_url(api, mask_last_segment=True),
-                        msg=resp_data.get("msg", "未知错误"),
+                        msg=resp_data.get("msg", i18n.tr("未知错误")),
                     )
                 )
         except Exception as e:
@@ -170,7 +170,8 @@ def xizhi(url: str, title: str, content: str) -> dict[str, list[str | int]]:
 # 在组装前显式拒绝。
 def _reject_smtp_newline(kind: str, value: str) -> None:
     if value and ("\n" in value or "\r" in value):
-        raise ValueError(f"{kind} 含换行符，禁止用于邮件头")
+        # 异常文本经 push 失败分支打印到控制台：模板过 tr 先查表后插值（kind 已在调用点翻好）
+        raise ValueError(i18n.tr("{kind} 含换行符，禁止用于邮件头", kind=kind))
 
 
 # 通过 SMTP 发送邮件（支持 SSL/非SSL），返回成功与失败收件人列表
@@ -202,12 +203,13 @@ def send_email(
 
     try:
         # 2026-09-12 审查 6.6：CRLF 注入校验前置。放行则攻击者可用含换行的主播名
-        # 伪造 Bcc/Reply-To 等邮件头；拒绝并记 warning 比静默发送伪造邮件安全
-        _reject_smtp_newline("邮件标题", title)
-        _reject_smtp_newline("发件人地址", sender_email)
-        _reject_smtp_newline("发件人名称", sender_name)
+        # 伪造 Bcc/Reply-To 等邮件头；拒绝并记 warning 比静默发送伪造邮件安全。
+        # kind 标签在调用点过 tr（盲区③推送文案，提取器扫不到裸字面量实参位）
+        _reject_smtp_newline(i18n.tr("邮件标题"), title)
+        _reject_smtp_newline(i18n.tr("发件人地址"), sender_email)
+        _reject_smtp_newline(i18n.tr("发件人名称"), sender_name)
         for rcpt in receivers:
-            _reject_smtp_newline("收件人地址", rcpt)
+            _reject_smtp_newline(i18n.tr("收件人地址"), rcpt)
 
         message = MIMEMultipart()
         send_name = base64.b64encode(sender_name.encode("utf-8")).decode()
@@ -306,7 +308,7 @@ def tg_bot(chat_id: str | int, token: str, content: str) -> dict[str, list[str |
         # Telegram 即便 HTTP 2xx 也可能业务失败（ok=false + description），须以 ok 字段判定、不能只看状态码。
         if resp_data.get("ok") is True:
             return {"success": [str(chat_id)], "error": []}
-        error_detail = resp_data.get("description", "未知错误")
+        error_detail = resp_data.get("description", i18n.tr("未知错误"))
         logger.warning(
             i18n.tr(
                 "tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 失败信息:{error_detail}",
@@ -374,7 +376,7 @@ def bark(
                     i18n.tr(
                         "Bark推送失败, 推送地址：{masked_api}, 失败信息：{message}",
                         masked_api=_mask_url(_api, mask_last_segment=True),
-                        message=resp_data.get("message", "未知错误"),
+                        message=resp_data.get("message", i18n.tr("未知错误")),
                     )
                 )
         except Exception as e:
@@ -512,7 +514,7 @@ def pushplus(token: str, title: str, content: str) -> dict[str, list[str | int]]
                     i18n.tr(
                         "PushPlus推送失败, Token：{masked_token}, 失败信息：{msg}",
                         masked_token=_mask_secret(_token),
-                        msg=resp_data.get("msg", "未知错误"),
+                        msg=resp_data.get("msg", i18n.tr("未知错误")),
                     )
                 )
         except Exception as e:

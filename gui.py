@@ -116,7 +116,8 @@ def _install_crash_sink() -> None:
 
             _root = _tk.Tk()
             _root.withdraw()
-            _messagebox.showerror("GUI 启动失败", text[-3000:])
+            # 标题过 tr：目录已有词条，崩溃弹窗在模块导入完成后才可能触发，可安全查表
+            _messagebox.showerror(i18n_module.tr("GUI 启动失败"), text[-3000:])
         except Exception:
             pass
 
@@ -843,7 +844,8 @@ class AdvancedSettingsWindow:
             self._baseline_content = _normalize_editor_text("# 配置文件不存在，请新建")
             self._disk_snapshot = None
         except Exception as e:
-            messagebox.showerror("错误", f"加载配置文件失败: {e}")
+            # MIN-2247 同口径：messagebox 标题与正文一并走 tr（f-string 直传是提取盲区②）
+            messagebox.showerror(i18n_module.tr("错误"), i18n_module.tr("加载配置文件失败: {e}", e=e))
             return
         try:
             self._disk_mtime = os.path.getmtime(self.config_file)
@@ -967,7 +969,7 @@ class AdvancedSettingsWindow:
                 self.log_callback("高级设置配置已保存")
             self._close()
         except Exception as e:
-            messagebox.showerror("错误", f"保存配置文件失败: {e}")
+            messagebox.showerror(i18n_module.tr("错误"), i18n_module.tr("保存配置文件失败: {e}", e=e))
 
 
 # 把纯文本原子写入配置文件（UTF-8-SIG，自动补末尾换行）。
@@ -2446,7 +2448,10 @@ class LiveRecorderGUI:
         if not url:
             self._log(f"未能在 URL_config.ini 中找到「{anchor_name}」对应的直播间地址，画质未修改", "error")
             messagebox.showerror(
-                "切换画质失败", f"未能在 config/URL_config.ini 中找到「{anchor_name}」对应的直播间地址"
+                i18n_module.tr("切换画质失败"),
+                i18n_module.tr(
+                    "未能在 config/URL_config.ini 中找到「{anchor_name}」对应的直播间地址", anchor_name=anchor_name
+                ),
             )
             return
         # 菜单首项「默认画质」= 不写画质段，回落到全局默认画质。
@@ -2457,7 +2462,7 @@ class LiveRecorderGUI:
         # 用户此刻尚未保存的整页编辑因此被静默丢弃。写盘前先交用户裁决，
         # 判据与 _watch_url_config 的脏检查同源（_has_unsaved_config_edits）。
         if self._has_unsaved_config_edits() and not messagebox.askyesno(
-            "配置文件已变更",
+            i18n_module.tr("配置文件已变更"),
             i18n_module.tr(
                 "直播间配置编辑器中有尚未保存的更改，切换画质会重新加载文件并丢弃这些更改。\n\n"
                 "点击「是」放弃未保存的更改并继续切换画质；\n点击「否」取消本次画质切换。"
@@ -2469,7 +2474,10 @@ class LiveRecorderGUI:
             changed = update_room_quality(self.url_config_file, url, new_quality)
         except (OSError, ValueError) as e:
             self._log(f"切换「{anchor_name}」画质失败: {e}", "error")
-            messagebox.showerror("切换画质失败", f"写入 config/URL_config.ini 失败：{e}")
+            # MIN-2247 同口径：标题与正文一并走 tr
+            messagebox.showerror(
+                i18n_module.tr("切换画质失败"), i18n_module.tr("写入 config/URL_config.ini 失败：{e}", e=e)
+            )
             return
         # 写回成功后重载编辑器：config_text 若仍持有写回前的旧快照，用户在 URL 配置页
         # 点「保存」会把画质段覆盖回旧内容（表现为切换"失效"）。_load_config 内部会同步
@@ -2888,7 +2896,7 @@ class LiveRecorderGUI:
             if _config_change_verdict(
                 self._url_disk_snapshot, disk_now, editor_text, self._config_baseline_content
             ) == "conflict" and not messagebox.askyesno(
-                "配置文件已变更",
+                i18n_module.tr("配置文件已变更"),
                 i18n_module.tr(
                     "config/URL_config.ini 在你上次加载之后已被外部修改（录制进程可能刚回写过主播名、"
                     "归一过地址或注释掉了失效房间）。\n\n"
@@ -2915,10 +2923,10 @@ class LiveRecorderGUI:
             # 弹出「未能在 URL_config.ini 中找到…画质未修改」。
             self._refresh_quality_context()
             self._log("URL 配置已保存")
-            messagebox.showinfo("成功", i18n_module.tr("URL 配置已保存成功！"))
+            messagebox.showinfo(i18n_module.tr("成功"), i18n_module.tr("URL 配置已保存成功！"))
         except Exception as e:
             self._log(f"保存配置文件失败: {e}", "error")
-            messagebox.showerror("错误", f"保存配置文件失败: {e}")
+            messagebox.showerror(i18n_module.tr("错误"), i18n_module.tr("保存配置文件失败: {e}", e=e))
 
     # ─── 状态信息 ──────────────────────────────────────────
 
@@ -3164,7 +3172,7 @@ class LiveRecorderGUI:
 
         except Exception as e:
             self._log(f"启动录制失败: {e}", "error")
-            messagebox.showerror("错误", f"启动录制失败: {e}")
+            messagebox.showerror(i18n_module.tr("错误"), i18n_module.tr("启动录制失败: {e}", e=e))
             # 启动失败时重置状态，允许用户重新启动
             self.process = None
             self.process_pid = None

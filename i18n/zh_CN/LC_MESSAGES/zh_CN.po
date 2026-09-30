@@ -3,7 +3,7 @@
 # This file is distributed under the same license as the DouyinLiveRecorder package.
 #
 # DouyinLiveRecorder 简体中文翻译文件
-# 更新日期: 2026-09-06
+# 更新日期: 2026-09-30
 #
 # 维护说明：
 #   - 本文件是翻译源文本；gettext 运行时只读取同目录编译产物 zh_CN.mo。
@@ -24,7 +24,7 @@ msgstr ""
 "Project-Id-Version: DouyinLiveRecorder\n"
 "MIME-Version: 1.0\n"
 "POT-Creation-Date: 2024-10-20 00:00+0800\n"
-"PO-Revision-Date: 2026-09-06 12:00+0800\n"
+"PO-Revision-Date: 2026-09-30 12:00+0800\n"
 "Last-Translator: Hmily <ihmily@github>\n"
 "Language-Team: Chinese\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -2765,3 +2765,56 @@ msgstr "界面主题已切换为 {theme}，但配置写回失败"
 
 msgid "界面主题已切换为 {theme}，但配置写回失败: {type_name}: {err}"
 msgstr "界面主题已切换为 {theme}，但配置写回失败: {type_name}: {err}"
+
+# =============================================================================
+# 盲区补录（2026-09-30）：print_colored / messagebox / 推送文案三类提取器盲区
+# 的用户可见文案，调用点同批改为 i18n.tr 形态（AGENTS「i18n 扫描盲区清单」）
+# =============================================================================
+
+msgid "[{record_name}]录制时已被注释或停止录制,下载中断"
+msgstr "[{record_name}]录制时已被注释或停止录制,下载中断"
+
+msgid "[{record_name}]录制时已被注释或停止录制,本条线程将会退出"
+msgstr "[{record_name}]录制时已被注释或停止录制,本条线程将会退出"
+
+msgid "[{record_name}]已经从录制列表中移除\n"
+msgstr "[{record_name}]已经从录制列表中移除\n"
+
+msgid "直播消息推送到{platform}失败: {e}"
+msgstr "直播消息推送到{platform}失败: {e}"
+
+msgid "加载配置文件失败: {e}"
+msgstr "加载配置文件失败: {e}"
+
+msgid "保存配置文件失败: {e}"
+msgstr "保存配置文件失败: {e}"
+
+msgid "未能在 config/URL_config.ini 中找到「{anchor_name}」对应的直播间地址"
+msgstr "未能在 config/URL_config.ini 中找到「{anchor_name}」对应的直播间地址"
+
+msgid "写入 config/URL_config.ini 失败：{e}"
+msgstr "写入 config/URL_config.ini 失败：{e}"
+
+msgid "启动录制失败: {e}"
+msgstr "启动录制失败: {e}"
+
+msgid "直播间状态更新通知"
+msgstr "直播间状态更新通知"
+
+msgid "{kind} 含换行符，禁止用于邮件头"
+msgstr "{kind} 含换行符，禁止用于邮件头"
+
+msgid "邮件标题"
+msgstr "邮件标题"
+
+msgid "发件人地址"
+msgstr "发件人地址"
+
+msgid "发件人名称"
+msgstr "发件人名称"
+
+msgid "收件人地址"
+msgstr "收件人地址"
+
+msgid "未知错误"
+msgstr "未知错误"

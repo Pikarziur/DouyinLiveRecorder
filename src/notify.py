@@ -34,7 +34,8 @@ from src.video_postprocess import get_startup_info
 # 按配置的推送渠道（微信/钉钉/邮箱/TG/BARK/NTFY/PUSHPLUS）分发直播状态消息：
 # record_name 房间显示名、live_url 直播间地址（部分渠道作跳转链接）、content 推送正文；无返回值
 def push_message(record_name: str, live_url: str, content: str) -> None:
-    msg_title = main.push_message_title.strip() or "直播间状态更新通知"
+    # 兜底标题是推送文案（提取盲区③），过 tr 先查表后插值才能被目录命中
+    msg_title = main.push_message_title.strip() or i18n.tr("直播间状态更新通知")
     push_functions = {
         "微信": lambda: xizhi(main.xizhi_api_url, msg_title, content),
         "钉钉": lambda: dingtalk(main.dingtalk_api_url, content, main.dingtalk_phone_num, main.dingtalk_is_atall),
@@ -80,7 +81,11 @@ def push_message(record_name: str, live_url: str, content: str) -> None:
                     )
                 )
             except Exception as e:
-                main.color_obj.print_colored(f"直播消息推送到{platform}失败: {e}", main.color_obj.RED)
+                # f-string 直传 print_colored 提取器扫不到（盲区①），先查表后插值
+                main.color_obj.print_colored(
+                    i18n.tr("直播消息推送到{platform}失败: {e}", platform=platform, e=e),
+                    main.color_obj.RED,
+                )
 
 
 # 录后自定义脚本执行超时（秒）：脚本由用户在配置里提供，若其挂起（等输入 / 死循环 /
@@ -317,7 +322,9 @@ def clear_record_info(record_name: str, record_url: str) -> None:
         if record_url in main.url_comments and record_url in main.running_list:
             main.running_list.remove(record_url)
             main.monitoring -= 1
-            main.color_obj.print_colored(f"[{record_name}]已经从录制列表中移除\n", main.color_obj.YELLOW)
+            main.color_obj.print_colored(
+                i18n.tr("[{record_name}]已经从录制列表中移除\n", record_name=record_name), main.color_obj.YELLOW
+            )
 
 
 # 房间线程退出时从运行列表移除 record_url 并把监控计数减一（幂等：已被 clear_record_info

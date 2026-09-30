@@ -275,9 +275,12 @@ yum command not found, trying to install using apt...: 未找到 yum 命令，�
 重新读取配置: 重新讀取配置
 错误: 錯誤
 错误信息: 錯誤訊息
+"[{record_name}]已经从录制列表中移除\n": "[{record_name}]已經從錄製列表中移除\n"
 '错误信息: 网络异常，请检查本网络是否能正常访问LiveMe直播平台': '錯誤訊息: 網路異常，請檢查本網路是否能正常訪問LiveMe直播平台'
 '错误信息: 网络异常，请检查本网络是否能正常访问PandaTV直播平台': '錯誤訊息: 網路異常，請檢查本網路是否能正常訪問PandaTV直播平台'
 '错误信息: 网络异常，请检查本网络是否能正常访问PopkonTV直播平台': '錯誤訊息: 網路異常，請檢查本網路是否能正常訪問PopkonTV直播平台'
+'[{record_name}]录制时已被注释或停止录制,下载中断': '[{record_name}]錄製時已被註釋或停止錄製,下載中斷'
+'[{record_name}]录制时已被注释或停止录制,本条线程将会退出': '[{record_name}]錄製時已被註釋或停止錄製,本條線程將會退出'
 '错误信息: 网络异常，请检查本网络是否能正常访问SOOP(原AfreecaTV)平台': '錯誤訊息: 網路異常，請檢查本網路是否能正常訪問SOOP(原AfreecaTV)平台'
 '错误信息: 网络异常，请检查本网络是否能正常访问TTingLive(原Flextv)直播平台': '錯誤訊息: 網路異常，請檢查本網路是否能正常訪問TTingLive(原Flextv)直播平台'
 '错误信息: 网络异常，请检查本网络是否能正常访问TwitchTV直播平台': '錯誤訊息: 網路異常，請檢查本網路是否能正常訪問TwitchTV直播平台'
@@ -471,6 +474,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 序号{count_variable} 网址内容获取失败,进行重试中...获取失败的地址是:{url_data}: 序號{count_variable} 網址內容獲取失敗,進行重試中...獲取失敗的位址是:{url_data}
 '当前时间: {now}': '當前時間: {now}'
 '录制分段开启: {split_time}秒': '錄製分段開啟: {split_time}秒'
+'{kind} 含换行符，禁止用于邮件头': '{kind} 含換行符，禁止用於郵件頭'
 '录制视频格式为: {video_save_type}': '錄製影片格式為: {video_save_type}'
 '录制视频质量为: {video_record_quality}': '錄製影片品質為: {video_record_quality}'
 微信推送失败, 推送地址：{masked_api}, 失败信息：{msg}: 微信推送失敗, 推送位址：{masked_api}, 失敗訊息：{msg}
@@ -488,6 +492,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 '未找到分段 FLV 文件，跳过转换: {seg_pattern}': '未找到分段 FLV 檔案，跳過轉換: {seg_pattern}'
 '检测到退出标志，录制线程退出: {record_url}': '檢測到退出標誌，錄製線程退出: {record_url}'
 '正在录制{no_repeat_recording_count}个直播: ': '正在錄製{no_repeat_recording_count}個直播: '
+'保存配置文件失败: {e}': '保存設定檔失敗: {e}'
 '流地址校验: {url} - CDN 探针退避中，跳过探针直接交由 ffmpeg 拉流': '流位址校驗: {url} - CDN 探針退避中，跳過探針直接交由 ffmpeg 拉流'
 '流地址校验: {url} - CDN 探针退避中，跳过本轮探针、回退下一候选': '流位址校驗: {url} - CDN 探針退避中，跳過本輪探針、回退下一候選'
 '流地址形态不合规，已丢弃（不交给 ffmpeg -i）: {url}': '流位址形態不合規，已丟棄（不交給 ffmpeg -i）: {url}'
@@ -498,6 +503,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 '流地址校验: {url} - Range-GET 重试通过({status_code})，先前拒绝为偶发': '流位址校驗: {url} - Range-GET 重試通過({status_code})，先前拒絕為偶發'
 '流地址校验: {url} - status_code={status_code}, content-type={content_type}；已无备选源，仍交由 ffmpeg 尝试（探针与 ffmpeg 客户端指纹不同）': '流位址校驗: {url} - status_code={status_code}, content-type={content_type}；已無備選源，仍交由 ffmpeg 嘗試（探針與 ffmpeg 客戶端指紋不同）'
 '流地址校验失败: {url} - HEAD={head_status} 通过但 GET 复核两次 {reject_status}（CDN 稳定拒绝 GET），判定不可达': '流位址校驗失敗: {url} - HEAD={head_status} 通過但 GET 複核兩次 {reject_status}（CDN 穩定拒絕 GET），判定不可達'
+写入 config/URL_config.ini 失败：{e}: 寫入 config/URL_config.ini 失敗：{e}
 ? '流地址校验失败: {url} - HEAD={status_code}, Range-GET={status_code_2}, content-type={content_type}'
 : '流位址校驗失敗: {url} - HEAD={status_code}, Range-GET={status_code_2}, content-type={content_type}'
 '流地址校验失败: {url} - status_code={status_code}, content-type={content_type}': '流位址校驗失敗: {url} - status_code={status_code}, content-type={content_type}'
@@ -512,11 +518,14 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 '终止 ffmpeg 进程时出错: {e}': '終止 ffmpeg 進程時出錯: {e}'
 '脚本命令解析失败: {command} - {type_name}: {e}': '腳本命令解析失敗: {command} - {type_name}: {e}'
 '自动获取 Twitch Client-Id 失败: {e}': '自動獲取 Twitch Client-Id 失敗: {e}'
+'加载配置文件失败: {e}': '加載設定檔失敗: {e}'
 '自动获取快手 did 失败: {e}': '自動獲取快手 did 失敗: {e}'
 '自动获取抖音 ttwid 失败: {e}': '自動獲取抖音 ttwid 失敗: {e}'
 自动追加需禁用SSL验证的平台 {appended} 写回配置失败（已忽略，内存态仍生效）: 自動追加需禁用SSL驗證的平台 {appended} 寫回配置失敗（已忽略，記憶體態仍生效）
 '解析结果无任何流地址（m3u8/flv/record_url 均为空），本轮放弃: {anchor_name}': '解析結果無任何流位址（m3u8/flv/record_url 均為空），本輪放棄: {anchor_name}'
 '语言已切换: {_new_language}': '語言已切換: {_new_language}'
+发件人名称: 寄件人名稱
+发件人地址: 寄件人地址
 '请求直播流失败，状态码: {status_code}': '請求直播流失敗，狀態碼: {status_code}'
 '读取 URL 配置失败，跳过主播名更新: {e}': '讀取 URL 配置失敗，跳過主播名更新: {e}'
 '跨循环关闭 AsyncClient 失败: {e}': '跨循環關閉 AsyncClient 失敗: {e}'
@@ -527,6 +536,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 '重命名主播目录失败（下轮重试）: {old_name} -> {new_name}: {e}': '重命名主播目錄失敗（下輪重試）: {old_name} -> {new_name}: {e}'
 钉钉推送失败, 推送地址：{masked_api}, {errmsg}: 釘釘推送失敗, 推送位址：{masked_api}, {errmsg}
 钉钉推送失败, 推送地址：{masked_api}, 错误信息:{e}: 釘釘推送失敗, 推送位址：{masked_api}, 錯誤訊息:{e}
+'启动录制失败: {e}': '啟動錄製失敗: {e}'
 '错误信息: {err} 发生错误的行数: {get_error_line}': '錯誤訊息: {err} 發生錯誤的行數: {get_error_line}'
 '错误信息: {e} 发生错误的行数: {get_error_line}': '錯誤訊息: {e} 發生錯誤的行數: {get_error_line}'
 'FLV下载错误: {source_url} - {type_name}: {e} 发生错误的行数: {get_error_line}': 'FLV下載錯誤: {source_url} - {type_name}: {e} 發生錯誤的行數: {get_error_line}'
@@ -625,6 +635,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "弹幕消息处理异常持续出现，后续同类异常不再逐条记录（累计 {count} 条）": "彈幕訊息處理異常持續出現，後續同類異常不再逐條記錄（累計 {count} 條）"
 "弹幕数据发送失败（已忽略）: {type_name}: {e}": "彈幕資料發送失敗（已忽略）: {type_name}: {e}"
 "An error occurred: {masked}": "An error occurred: {masked}"
+收件人地址: 收件人地址
 "sync_req 请求失败: {masked_url} - {type_name}: {e}": "sync_req 請求失敗: {masked_url} - {type_name}: {e}"
 "Web 模式：录制引擎已因磁盘空间不足停止，Web 面板继续服务": "Web 模式：錄製引擎已因磁碟空間不足停止，Web 面板繼續服務"
 "[{record_name}]等待录制槽位期间检测到停止信号，放弃本轮录制": "[{record_name}]等待錄製槽位期間偵測到停止訊號，放棄本輪錄製"
@@ -654,8 +665,10 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "B站房间信息获取失败（下轮重试）: url={url} - {type_name}: {e}": "B站房間資訊獲取失敗（下輪重試）: url={url} - {type_name}: {e}"
 "B站接口返回异常 code={code}（疑似风控/签名失效），本轮跳过": "B站介面返回異常 code={code}（疑似風控/簽名失效），本輪跳過"
 "SMTP 服务器不支持 STARTTLS，本次将以明文发送邮箱授权码（存在被窃听风险，建议在配置中改为启用 SSL 加密）: {type_name}": "SMTP 伺服器不支援 STARTTLS，本次將以明文傳送信箱授權碼（存在被竊聽風險，建議在設定中改為啟用 SSL 加密）: {type_name}"
+未知错误: 未知錯誤
 "YY 标题补取失败（不影响取流）: {type_name}": "YY 標題補取失敗（不影響取流）: {type_name}"
 "[{record_name}] 转码任务提交失败（{type_name}）: {e}": "[{record_name}] 轉碼任務提交失敗（{type_name}）: {e}"
+未能在 config/URL_config.ini 中找到「{anchor_name}」对应的直播间地址: 未能在 config/URL_config.ini 中找到「{anchor_name}」對應的直播間地址
 "[弹幕采集]SRT 关闭等待锁超时（{seconds}s），跳过本次关闭以免阻塞录制线程": "[彈幕擷取]SRT 關閉等待鎖逾時（{seconds}s），跳過本次關閉以免阻塞錄製執行緒"
 "[弹幕采集]SRT 写入失败(继续采集): {type_name}: {e}（本窗口累计失败 {count} 条）": "[彈幕擷取]SRT 寫入失敗(繼續擷取): {type_name}: {e}（本視窗累計失敗 {count} 筆）"
 "[弹幕采集]SRT 写入队列已满，正在丢弃弹幕（累计 {count} 条）——请检查磁盘空间与写入性能": "[彈幕擷取]SRT 寫入佇列已滿，正在丟棄彈幕（累計 {count} 筆）——請檢查磁碟空間與寫入效能"
@@ -724,7 +737,9 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "[B站直播]spi 两跳均未返回 buvid（疑似风控 200+空 body），改走首页 Set-Cookie 兜底": "[B站直播]spi 兩跳均未返回 buvid（疑似風控 200+空 body），改走首頁 Set-Cookie 兜底"
 "[B站直播]弹幕信息获取失败: {type_name}: {e}": "[B站直播]彈幕信息獲取失敗: {type_name}: {e}"
 "[web] ⚠️ 严重安全警告: Web 面板正以「无认证 + 非回环地址」运行，能访问该地址的任何人可执行：\n① 读写全部配置（仅「自定义脚本执行命令」被禁止）；② 读取 logs 下的运行日志；③ 遍历并下载 downloads 下全部录制文件；④ 增删改直播间并可提交任意地址（存在被用作内网探测跳板的风险）；⑤ 启停录制。\n建议立即在 config.ini [Web] 节设置 web_auth_enable = true 并配置 web_password，然后删除环境变量 DOUYIN_WEB_ALLOW_INSECURE 并重启。": "[web] ⚠️ 嚴重安全警告: Web 面板正以「無認證 + 非回環位址」執行，能存取該位址的任何人可執行：\n① 讀寫全部設定（僅「自訂指令碼執行命令」被禁止）；② 讀取 logs 下的執行日誌；③ 遍歷並下載 downloads 下全部錄製檔案；④ 增刪改直播間並可提交任意位址（存在被用作內網探測跳板的風險）；⑤ 啟停錄製。\n建議立即在 config.ini [Web] 節設定 web_auth_enable = true 並配置 web_password，然後刪除環境變數 DOUYIN_WEB_ALLOW_INSECURE 並重啟。"
+'直播消息推送到{platform}失败: {e}': '直播訊息推送到{platform}失敗: {e}'
 "[web] 清理 HTTP 连接池失败: {type_name}: {e}": "[web] 清理 HTTP 連接池失敗: {type_name}: {e}"
+直播间状态更新通知: 直播間狀態更新通知
 "[web] 清理 ffmpeg 进程失败: {type_name}: {e}": "[web] 清理 ffmpeg 進程失敗: {type_name}: {e}"
 "[ws_client] 心跳回调超时 ({seconds}s),关闭连接以触发重连": "[ws_client] 心跳回呼逾時 ({seconds}s),關閉連線以觸發重連"
 "[{record_name}] 达到单次录制时长上限（{limit}），结束本轮并在下轮新开一个文件": "[{record_name}] 達到單次錄製時長上限（{limit}），結束本輪並在下一輪新開一個文件"
@@ -804,6 +819,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "斗鱼 websec 签名参数不完整: enc_time 缺失或非数值，本轮跳过取流": "鬥魚 websec 簽名參數不完整：enc_time 缺失或非數值，本輪跳過取流"
 "斗鱼 websec 签名参数不完整: rand_str/key 缺失或类型异常，本轮跳过取流": "鬥魚 websec 簽名參數不完整: rand_str/key 缺失或類型異常，本輪跳過取流"
 "无可用弹幕服务器（host 均不在 B站官方域白名单内）": "無可用彈幕伺服器（host 均不在 B站官方域白名單內）"
+邮件标题: 郵件標題
 "未启用": "未啟用"
 "未安装 PyYAML，无法加载 YAML 格式翻译目录 {yaml_path}（该语言已回退为默认语言）": "未安裝 PyYAML，無法載入 YAML 格式翻譯目錄 {yaml_path}（該語言已回退為默認語言）"
 "未找到代理信息: {type_name}: {e}": "未找到代理資訊: {type_name}: {e}"
@@ -826,13 +842,6 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "配置文件已保存！": "設定檔已保存！"
 "重连超过最大次数，与服务器断开连接: {reason}": "重連超過最大次數，與伺服器中斷連線: {reason}"
 "钉钉推送失败, 推送地址：{masked_api}, 错误信息: {type_name}: {e}": "釘釘推送失敗, 推送位址：{masked_api}, 錯誤訊息: {type_name}: {e}"
-"界面主题": "介面主題"
-"浅色": "淺色"
-"深色": "深色"
-"高对比度": "高對比"
-"界面主题已切换: {theme}": "介面主題已切換: {theme}"
-"界面主题已切换为 {theme}，但配置写回失败": "介面主題已切換為 {theme}，但設定寫回失敗"
-"界面主题已切换为 {theme}，但配置写回失败: {type_name}: {err}": "介面主題已切換為 {theme}，但設定寫回失敗: {type_name}: {err}"
 "界面主题": "介面主題"
 "浅色": "淺色"
 "深色": "深色"

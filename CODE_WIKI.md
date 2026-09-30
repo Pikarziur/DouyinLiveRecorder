@@ -1624,6 +1624,23 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
 
+### v4.4.0-dev (2026-09-30) — i18n 盲区补录批次：提取器盲区①②③的用户可见文案 tr 化 + 四语目录同步登记 16 条 + zh_CN.mo 重编
+
+**调用点 tr 化（先查表后插值，消除「目录有词条但运行时永远查不到」）**
+
+- **print_colored（盲区①）**：`main.py` 下载中断 / 线程退出两条、`src/notify.py` 推送失败 / 移除录制列表两条——f-string 直传改 `i18n.tr(常量模板, **kw)` 预格式化后整体传入（MIN-2233 同型）。
+- **messagebox（盲区②）**：`gui.py` 共 10 处——6 条错误正文（加载/保存配置文件失败、启动录制失败、写入 URL_config.ini 失败、未找到直播间地址）补 tr，7 处标题补 tr（错误×4 个调用点、切换画质失败×2、成功、配置文件已变更×2、GUI 启动失败），对齐 MIN-2247「标题与正文一并走 tr」口径。
+- **推送文案（盲区③）**：`src/notify.py` 推送标题兜底「直播间状态更新通知」过 tr；`msg_push.py` SMTP CRLF 守卫改 `tr("{kind} 含换行符，禁止用于邮件头", kind=tr(kind))`（4 个 kind 标签在调用点翻译）；6 处推送失败 `errmsg` 兜底「未知错误」过 tr。
+
+**四语目录登记（16 条新 msgid）**：zh_CN 恒等（po 尾部新分区 + 更新日期/PO-Revision-Date）；en_US/en_GB 同文英文（「」转双引号）；zh_TW 繁体且术语对齐既有条目（配置文件→設定檔、线程→線程、消息→訊息、注释→註釋）。zh_TW 顺带**去重 7 条主题段重复键**（值完全一致，`界面主题` 等 7 条被整块登记两次，摘除前一份），四目录键集恢复严格一致（808 键）。
+
+**回归锁**：`tests/test_i18n_migration.py` 新增不变量④ `test_no_valuable_fstring_in_print_colored_or_messagebox`——全仓扫描盲区实参位禁插值 f-string + 谓词自检（tr 预格式化 / 常量 / 动态非模板实参不误伤）；变异验证：回改一处为 f-string 用例即红、按字节还原无残留。
+
+**验证**
+
+- 门禁：`run_gates.py` 8/8 绿；全量 pytest 3690 passed / 14 skipped / 0 警告；`check_coverage.py` 44 模块全达标（84.76%）；basedpyright 0 error / 0 warning；`compile_po.py --check` .po/.mo 同步（.mo 头部 N=809，即 808 键+1）。
+- i18n 链路端到端：四语言 `set_language` 逐一热切换，16 条新词条经 `.mo`（zh_CN）/ JSON（en 两语）/ YAML（zh_TW）全部命中（含 SMTP 守卫抛错文案 en_US/zh_TW 双语核对）。本批为文案管道改动，不涉录制链路 / 选源 / ffmpeg 参数 / 平台解析行为，无需真机房间验证。
+
 ### v4.4.0-dev (2026-09-30) — P0 修复批次：`CODE_REVIEW_2026-09-30.md` 严重 2 项 + P0 六项落地（每项带回归锁）
 
 > 按报告第 8 章「P0（立即修复）」执行；P1（安装链/HTTP 面上界/测试防线等）与 P2 待后续批次。
