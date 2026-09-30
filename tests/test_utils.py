@@ -272,12 +272,28 @@ class TestReplaceUrl:
         content = f.read_text(encoding="utf-8-sig")
         assert "https://new.com/stream" in content
 
-    def test_replace_inline(self, tmp_path: Path) -> None:
-        f = tmp_path / "test.txt"
-        f.write_text("url = https://old.com/live\n", encoding="utf-8-sig")
+    def test_replace_segment_in_config_line(self, tmp_path: Path) -> None:
+        # M-18（2026-09-30）：URL_config.ini 的真实行形态是逗号分段，URL 段须整段替换。
+        # [历史注] 本用例原为 `url = <url>` 行内子串替换形态（test_replace_inline），
+        # 那正是 M-18 判定要移除的无边界子串行为。
+        f = tmp_path / "URL_config.ini"
+        f.write_text("https://old.com/live,主播: 张三,原画\n", encoding="utf-8-sig")
         replace_url(f, "https://old.com/live", "https://new.com/live")
         content = f.read_text(encoding="utf-8-sig")
-        assert "https://new.com/live" in content
+        assert content == "https://new.com/live,主播: 张三,原画\n"
+
+    def test_prefix_overlapping_sibling_line_untouched(self, tmp_path: Path) -> None:
+        # M-18 变异判据（安全不变量）：URL 前缀重叠的兄弟房间行不得被误伤。旧实现的
+        # `elif old in line: line.replace(...)` 会把 …/l/1234567 整行 replace 成
+        # 「#…/l/123456」+「7,主播: 长号」尾巴——兄弟房间被静默注释（停止监测）。
+        f = tmp_path / "URL_config.ini"
+        f.write_text(
+            "https://x.example/l/123456,主播: 短号\nhttps://x.example/l/1234567,主播: 长号\n",
+            encoding="utf-8-sig",
+        )
+        replace_url(f, "https://x.example/l/123456", "#https://x.example/l/123456")
+        content = f.read_text(encoding="utf-8-sig")
+        assert content == "#https://x.example/l/123456,主播: 短号\nhttps://x.example/l/1234567,主播: 长号\n"
 
     def test_no_match_unchanged(self, tmp_path: Path) -> None:
         f = tmp_path / "test.txt"

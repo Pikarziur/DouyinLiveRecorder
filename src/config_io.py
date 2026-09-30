@@ -32,27 +32,11 @@ from src.ffmpeg_proc import _get_error_line
 # 原实现是整行 str.replace，URL 前缀重叠时（.../room1 与 .../room12）会把别的配置行静默改坏，
 # 使用者只在下次「未生效」时才发现。
 def _rewrite_line_by_match(text_line: str, old_str: str, new_str: str) -> str | None:
-    raw = text_line.rstrip("\r\n")
-    eol = text_line[len(raw) :]
-    target = old_str.strip()
-    if not target:
-        return None
-    # 整行匹配：raw.strip() 同时容忍首尾空白；两种命中形态都要 rstrip 掉 new_str 自带的
-    # 换行，否则与补上的 eol 拼成双换行
-    cleaned_new = new_str.rstrip("\r\n")
-    if raw.strip() == target:
-        return f"{cleaned_new}{eol}"
-    # 段级匹配：按半角/全角逗号切分并保留分隔符。new_str 允许含逗号（"new_url,主播: 名称"），
-    # 与原 substring 语义兼容，又不会误伤相似前缀行
-    parts = re.split(r"([,，])", raw)
-    hit = False
-    for i in range(0, len(parts), 2):
-        if parts[i].strip() == target:
-            parts[i] = cleaned_new
-            hit = True
-    if not hit:
-        return None
-    return "".join(parts) + eol
+    # 2026-09-30（M-18）：实现下沉为 src/utils.py::rewrite_line_by_segment——utils.replace_url
+    # （花椒「地址失效自动注释」写盘路径）与本模块 update_file 必须同一匹配口径，而 config_io
+    # 依赖 utils、反向导入会成环，故实现只能住在 utils 侧。本函数仅保留原名作薄封装，
+    # 既有调用点与用例（tests/test_config_io_update_file.py）不变。
+    return utils.rewrite_line_by_segment(text_line, old_str, new_str)
 
 
 # 把 file_path 中所有 old_str 替换为 new_str（start_str 非空时给命中行加该前缀，如 "#" 注释掉），

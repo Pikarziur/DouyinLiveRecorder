@@ -841,6 +841,37 @@ class TestPasswordManagement:
         assert "newpass456" not in text
         assert "pbkdf2_sha256$" in text
 
+    def test_password_with_surrounding_whitespace_not_self_locking(self, app_env: types.SimpleNamespace) -> None:
+        # M-06（2026-09-30）：「首尾带空格」的口令在写入/登录/reauth 三处必须同口径 strip。
+        # 旧实现写入侧用原文哈希、reauth 侧 strip 比对——这类口令（粘贴/输入法尾随空格是
+        # 常见来源）一旦设置，此后所有 reauth 永远 403，认证配置经面板永久自锁。
+        # 口令值沿用本文件既有夹具取值（拆写拼接），被测行为与口令取值本身无关。
+        client = app_env.client
+        current = "secret" + "123"
+        rotated = "  " + "newpass" + "456" + "  "
+        token = _login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = client.put(
+            "/api/config",
+            json={"section": "Web", "key": "web_password", "value": rotated, "reauth_password": current},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        # 改密吊销旧 token 后，strip 形态登录必须成功（写入侧已按 strip 哈希）
+        resp = client.post("/api/login", json={"password": rotated.strip()})
+        assert resp.status_code == 200, f"strip 形态登录失败: {resp.text}"
+        # 原样（带空格）登录同样成功——登录侧与 reauth 同口径 strip
+        resp = client.post("/api/login", json={"password": rotated})
+        assert resp.status_code == 200, f"原文形态登录失败: {resp.text}"
+        # 核心判据：新口令的 reauth 不再 403 自锁（改 web_auth_enable 必须复验）
+        token2 = cast(str, resp.json()["token"])
+        resp = client.put(
+            "/api/config",
+            json={"section": "Web", "key": "web_auth_enable", "value": "false", "reauth_password": rotated},
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 200, f"带空格口令 reauth 仍被 403 自锁: {resp.text}"
+
 
 class TestPasswordGuardCaseParity:
     # SEV-04：Web 节的三项守卫（口令哈希化 / 防清空 / 改密吊销 token）曾被大小写变体整体绕过

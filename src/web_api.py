@@ -686,9 +686,11 @@ def create_app(
         _purge_expired_tokens()
         if not cast(str, cfg["web_password"]):
             raise HTTPException(500, "web_password 未配置但认证已开启")
-        # 兼容历史明文存储：首次登录时升级为 PBKDF2 哈希，避免明文落盘
+        # 兼容历史明文存储：首次登录时升级为 PBKDF2 哈希，避免明文落盘。
+        # M-06（2026-09-30）：升级哈希同样以 strip 后的形态为准——登录比对统一 strip（见下），
+        # 存量「首尾带空格」的明文口令才不会被这次升级锁死。
         if not is_hashed_web_password(cast(str, cfg["web_password"])):
-            hashed = hash_web_password(cast(str, cfg["web_password"]))
+            hashed = hash_web_password(cast(str, cfg["web_password"]).strip())
             # H-6：持引擎配置锁写 config.ini，避免与主循环热加载读/其他写并发交错
             import main as _main
 
@@ -699,7 +701,10 @@ def create_app(
             # 限制在单次请求内、并不能替缓存补上这次写入。
             _invalidate_web_cfg_cache()
             cfg["web_password"] = hashed
-        if not verify_web_password(req.password, cast(str, cfg["web_password"])):
+        # M-06（2026-09-30）：登录比对统一 strip。写入侧以 strip 后的值哈希（/api/config），
+        # reauth 复验也用 strip 后的值（MID-2241）；登录侧若仍用原文，设置时粘贴带出的首尾
+        # 空格会重现「能登录、不能 reauth」的口径分叉，进而变成认证配置经面板自锁。
+        if not verify_web_password(req.password.strip(), cast(str, cfg["web_password"])):
             with _FAILED_LOGINS_LOCK:
                 _FAILED_LOGINS.setdefault(client_ip, []).append(time.time())
                 _GLOBAL_LOGIN_FAILURES.append(time.time())
@@ -1217,10 +1222,16 @@ def create_app(
             validate_config_target(section, key, value)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
-        # 密码统一以 PBKDF2 哈希存储，避免明文落盘
+        # 密码统一以 PBKDF2 哈希存储，避免明文落盘。
+        # M-06（2026-09-30）：哈希前先 strip——reauth 复验用的是 strip 后的值（MID-2241），
+        # 登录比对也已统一 strip；写入侧若用原文哈希，设置「首尾带空格」的口令（粘贴/输入法
+        # 尾随空格是常见来源）后所有 reauth 永远 403，认证配置经面板永久自锁、只能手改文件。
         if is_web_section and key_norm == "web_password" and value.strip():
-            if not is_hashed_web_password(value):
-                value = hash_web_password(value)
+            normalized_password = value.strip()
+            if not is_hashed_web_password(normalized_password):
+                value = hash_web_password(normalized_password)
+            else:
+                value = normalized_password
         # H-6：持引擎配置锁写 config.ini，避免与主循环热加载读/其他 Web 写并发交错
         import main as _main
 

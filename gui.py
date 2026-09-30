@@ -187,7 +187,7 @@ import i18n as i18n_module
 from src.config_bool import parse_config_bool
 from src.logger import child_process_env, logger
 from src.ui_theme import DEFAULT_THEME, THEME_IDS, ThemeManager, load_theme_preference, save_theme_preference
-from src.utils import mask_credentials
+from src.utils import atomic_write_text, mask_credentials
 from src.web_config import (
     find_room_url_by_anchor_name,
     parse_url_config,
@@ -976,25 +976,21 @@ def _save_text_to_file(content: str, file_path: str) -> None:
     # 2026-09-12 修复（CODE_REVIEW_FIX_1 F-04）：原子写（tmp + os.replace）。原直接 "w" 覆盖写
     # 在写入窗口内文件处于半写状态，录制引擎并发读到截断内容会被当成有效配置
     # （历史形态：保存瞬间偶尔丢房间且难复现）。
-    # 为何不复用 src.config_io._atomic_write_text：该模块模块级 `import main`，而本文件只以子进程方式
+    # 为何不用 src.config_io._atomic_write_text：该模块模块级 `import main`，而本文件只以子进程方式
     # 启动 main.py、从不 import 它——GUI 进程拉入它会连带触发 main 的模块级初始化（FFmpeg 检查、
-    # 配置读取、备份线程），属不该有的副作用。故本地实现同款原子写，编码固定 utf-8-sig（与原行为一致）。
+    # 配置读取、备份线程），属不该有的副作用。
+    # M-02（2026-09-30）：改委托 src.utils.atomic_write_text（全仓唯一加固实现；utils 不 import
+    # main、无上述副作用）——补上 flush+fsync 与「replace 前保留目标文件原 mode」（MIN-21），
+    # 消除 SEV-2211 同族的「POSIX 下每次保存把 0600 收紧还原成 umask 权限」缺口（含全部平台
+    # 口令/Cookie 的配置文件因此变为同机任意本地用户可读）。失败语义不变：调用方（两处保存
+    # 按钮）依赖异常弹错误框，这里把 False 转成 OSError 原样上抛。
+    # [历史注] 2026-09-12~2026-09-29 本函数是本地同款原子写副本：有 tmp+replace、缺 fsync 与
+    # mode 保留。
     content = content.rstrip("\n")
     if content and not content.endswith("\n"):
         content += "\n"
-    tmp = f"{file_path}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8-sig") as f:
-            _ = f.write(content)
-        os.replace(tmp, file_path)
-    except OSError:
-        # 失败时清理临时文件并原样上抛：调用方（两处保存按钮）已各自弹错误框。
-        # 关键是不留下 .tmp 垃圾，也不让半写的 tmp 被误当成配置。
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+    if not atomic_write_text(file_path, content, encoding="utf-8-sig"):
+        raise OSError(i18n_module.tr("写入配置文件失败（已保留原文件）: {err}", err=file_path))
 
 
 # 将文本控件内容保存为文件（UTF-8-SIG，自动补末尾换行）。

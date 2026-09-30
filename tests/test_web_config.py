@@ -9,6 +9,7 @@
 # - TestUpdateRoomQuality：行级改写 + URL 归一化匹配 + 注释前缀保留 + 幂等性 + 原子写
 # - TestFindRoomUrlByAnchorName：主播名反查 URL，GUI 画质切换写回依赖此入口
 
+import configparser
 from pathlib import Path
 
 import pytest
@@ -508,6 +509,30 @@ class TestUpdateConfigLine:
 
     def test_missing_file_returns_false(self, tmp_path: Path) -> None:
         assert update_config_line(tmp_path / "nope.ini", "Web", "web_host", "x") is False
+
+    def test_hash_in_value_reads_back_as_new_value(self, tmp_path: Path) -> None:
+        # M-07（2026-09-30）：读侧 configparser 未开启 inline_comment_prefixes，旧值里的
+        # " #" 本就是值的一部分——二次更新后读回值必须**等于新值**，不得被旧尾注污染
+        # （旧实现把 " #" 之后当注释拼回新值，平台 Cookie/含井号 token 因此静默失效）。
+        parser = configparser.ConfigParser()
+        cfg = tmp_path / "config.ini"
+        cfg.write_text("[Sec]\nkey = old #b\n", encoding="utf-8-sig")
+        assert update_config_line(cfg, "Sec", "key", "new") is True
+        parser.read(cfg, encoding="utf-8-sig")
+        assert parser.get("Sec", "key") == "new", "无引号值含 ' #' 时尾串被当注释拼回新值"
+        # 带引号且值含 " #"、无尾注的同型：闭合引号之前的一切都属值本身（F-23 回落分支残留）
+        cfg2 = tmp_path / "config2.ini"
+        cfg2.write_text('[Sec]\nkey = "a #b"\n', encoding="utf-8-sig")
+        assert update_config_line(cfg2, "Sec", "key", "new") is True
+        parser2 = configparser.ConfigParser()
+        parser2.read(cfg2, encoding="utf-8-sig")
+        assert parser2.get("Sec", "key") == "new", "带引号值的 ' #' 被回落启发式二次污染"
+        # F-23 既有语义保持：引号值后的真注释仍原样保留
+        cfg3 = tmp_path / "config3.ini"
+        cfg3.write_text('[Sec]\nkey = "v" # 备注\n', encoding="utf-8-sig")
+        assert update_config_line(cfg3, "Sec", "key", "new") is True
+        text = cfg3.read_text(encoding="utf-8-sig")
+        assert "key = new # 备注" in text
 
 
 class TestVerifyWebPassword:

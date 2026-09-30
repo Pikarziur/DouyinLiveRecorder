@@ -1624,6 +1624,100 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
 
+### v4.4.0-dev (2026-09-30) — P0 修复批次：`CODE_REVIEW_2026-09-30.md` 严重 2 项 + P0 六项落地（每项带回归锁）
+
+> 按报告第 8 章「P0（立即修复）」执行；P1（安装链/HTTP 面上界/测试防线等）与 P2 待后续批次。
+
+**严重（standalone 孪生漂移）**
+
+- **S-01**：`scripts/douyin_live_recorder_standalone.py` 补三道防线——① `_build_opener` 改显式 Handler 白名单（不再经 `build_opener`，file/ftp/data 不再注册，与主线 `sync_http` 定稿同构，`UnknownHandler` 保留为白名单外协议的统一拒绝口）；② 新增 `_untrusted_stream_target_reason`（协议白名单 + IP 字面量含 inet_aton 缩写形态 `2130706433`/`0x7f000001`/`0177.0.0.1`/`127.1` + IPv4 映射 + CGNAT + 内部用途主机名，零 DNS 离线判定，与主线 `web_config._internal_ip_reason` 同判据的离线子集），接线进 `validate_stream_url` 入口（last_resort 也不放行——「末位候选仅告警放行」的对象是 CDN 拒绝类误杀）与 `select_source_url` 候选过滤（逐条留日志可归因）；③ 两处 ffmpeg 命令定义点补 `-protocol_whitelist`（与 `main.py:3472` 逐字同值、位于 `-i` 之前）。
+- **S-02**：ffmpeg 命令日志脱敏——`run_ffmpeg` 写 `logs/ffmpeg.log` 前经 `_mask_ffmpeg_cmd_for_log`（`-headers` 值换 `<headers:N chars>` 占位符、`-i` 值走 `strip_query` 保留路径），平台 Cookie 与反盗链 token 不再明文落盘（该日志 append 无轮转）。
+
+**中等（P0 组）**
+
+- **M-01**：`notify.remove_room_from_running` 不再因 `exit_recording=True` 跳过清理（磁盘满暂停并非进程退出，且清理在 `record_state_lock` 内幂等、真进程退出多跑一次无害）——暂停期退出的房间不再残留 `running_list`，空间恢复后主循环拉起条件重新成立，恢复日志与实际行为一致。
+- **M-02**：`gui._save_text_to_file` 委托 `src.utils.atomic_write_text`（全仓唯一加固实现：flush+fsync + replace 前保留目标文件原 mode；utils 不 import main、无 config_io 那条副作用），消除 SEV-2211 同族的「POSIX 下每次保存把 0600 收紧还原成 umask 权限」缺口；失败语义不变（False 转 OSError 上抛供错误框）。
+- **M-06**：Web 口令 strip 口径三处统一——写入侧先 strip 再哈希、登录比对 strip、历史明文升级哈希也以 strip 形态为准；设置首尾带空格的口令后 reauth 不再永久 403（认证配置经面板自锁）。
+- **M-07**：`web_config.update_config_line` 移除无引号值的 `" #"`/`" ;"` 行内注释回落启发式（读侧 configparser 从未开启 inline_comment_prefixes，旧值含 ` #` 时该串本就是值的一部分，拼回新值＝静默污染）；带引号值只在**闭合引号之后**找注释（F-23 语义保持，`key = "a #b"` 不再被回落分支二次污染）。
+- **M-17**：`utils._SECRET_HEADER_RE` 驼峰分支摘掉恒死 guard（与 `(?<=[a-z])` 同位置互斥、分支永不匹配）——header 形态的驼峰复合键（`myToken:`/`sessionKey:` 等）恢复脱敏；两条配套边界：独立参数分支**不得**加 quote 排除（shell 命令串 `--header "Authorization: Bearer X"` 键名前恰是引号，排除即漏抹，`tests/test_notify_script_guard.py` 全组同证）；「guard 防 https: 被误抹」的旧结论在当前键名表下已被证伪（无键名可匹配 `https:`）。
+- **M-18**：`utils.replace_url` 改段级精确匹配——匹配实现下沉为 `utils.rewrite_line_by_segment`（`config_io._rewrite_line_by_match` 变薄封装委托，单一实现消除双轨漂移），URL 前缀重叠的兄弟房间行（`…/l/123456` 与 `…/l/1234567`）不再被花椒「地址失效自动注释」整行误伤。
+
+**验证**
+
+- `[2026-09-30] 虎牙 | https://www.huya.com/660002 | scripts/douyin_live_recorder_standalone.py --dry-run | PASS | 真实在播房间解析出「王者荣耀赛事」，候选全部过新守卫，探针 403 重试救回→tx 线 200，选中流地址（S-01 三道防线 + S-02 增量验证）`。
+- 门禁：`run_gates.py` 8/8 绿；全量 pytest 3689 passed / 14 skipped / 0 警告；`check_coverage.py` 44 模块全达标；basedpyright 0 error / 0 warning。M-18 回归锁做变异验证（旧子串实现下用例变红、按字节还原、行尾形态未破坏）。
+- 回归锁：`tests/test_regression_2026_09_22_standalone.py`（TestUntrustedStreamTargetGuard / TestWhitelistOpener / TestFfmpegCommandHardening / TestFfmpegCommandLogMasking）、`tests/test_regression_2026_09_22_utils.py`（header 形态驼峰复合键 + 带引号 header）、`tests/test_web_api.py::TestPasswordManagement::test_password_with_surrounding_whitespace_not_self_locking`、`tests/test_web_config.py::TestUpdateConfigLine::test_hash_in_value_reads_back_as_new_value`、`tests/test_utils.py::TestReplaceUrl::test_prefix_overlapping_sibling_line_untouched`、`tests/test_regression_2026_09_22_main.py::TestDiskFullPauseCleanupStillRuns`、`tests/test_gui_save_atomic.py`。
+
+### v4.4.0-dev (2026-09-30) — 全工作区代码审查（产出 `CODE_REVIEW_2026-09-30.md`）：18 批逐文件深审 + Mimosa 深扫交叉证据，严重 2 / 中等 51 / 轻微 160
+
+> 用户口径：对本工作空间全部源代码（Python/JavaScript/Node.js/HTML/CSS/CI 等，排除 node_modules、dist、build 等第三方依赖目录与构建产物）做全面审查，重点排查代码质量、潜在缺陷、安全漏洞与逻辑错误，逐文件记录、按严重程度分类成正式报告。报告落盘为根目录 [`CODE_REVIEW_2026-09-30.md`](CODE_REVIEW_2026-09-30.md)。
+
+| 项 | 内容 |
+| --- | --- |
+| 审查方法与覆盖 | 18 个按模块分组的独立深审批次（12 生产 + 6 测试），每组全文逐行读完、附「既定约定防误报清单 + 专项锚点」；覆盖生产代码约 42,000 行（`main.py` 5,465 / `gui.py` 4,526 / `src/spider.py` 7,100 / Web 层 3,439 / 选源调度 3,498 / 弹幕链 2,743 / HTTP 基建 2,084 / 工具层 3,524 / 安装后处理 2,600 / 前端与签名 JS 4,805 / 构建门禁 CI 约 8,000 / standalone 2,261）与测试约 56,200 行（`tests/*.py` 124 文件 + `tests/frontend` 8 文件）；排除 `typings/`、`src/proto/douyin_pb2.py`（protoc 生成）、`src/javascript/crypto-js.min.js`（仅做篡改专项检查：全文件模式扫描无网络外发/动态构造/系统能力调用，判定为标准 crypto-js 4.x 未被改动）。报告成文前由主审对 2 项严重 + 5 项代表性中等做行号级复核，全部证实 |
+| 严重 2 项（均在 `scripts/douyin_live_recorder_standalone.py`，孪生漂移） | ① 探针/录制链 SSRF 与本地文件读取链（`:180-187/:746-756/:1456-1494`）：默认 `build_opener` 含 FileHandler + 平台候选无协议/内网判定 + ffmpeg 命令缺 `-protocol_whitelist`（主线 `main.py:3466` 已有）三层叠加，`file://` 与 `169.254.169.254` 可被「探测→放行→ffmpeg 录制落盘」完整走通；② 完整 ffmpeg 命令（含 Cookie 头与带 token 流 URL）逐轮写入 `logs/ffmpeg.log` 且无轮转（`:1543/:1552`），与「凭据不落盘」红线冲突 |
+| 中等 51 项的分布与代表 | 生产 37：standalone 4（MID-49 斗鱼 POST 未回灌、探针异常带全 URL、GBK 配置启动崩溃、Windows terminate 硬杀截断 mp4）；安装链 6（node TOFU 基准读失败 fail-open、新 zip 无形态校验即记账、版本号零校验、直解压应用根、导入期 `check_node` 并发安装竞态、`check_node` 异常可炸掉 `import src`）；工具层 4（`_SECRET_HEADER_RE` 驼峰分支两 lookbehind 互斥恒死——header 形态驼峰凭据不脱敏、`replace_url` 子串误伤注释掉 ID 前缀重叠的兄弟房间、logger 双 sink 部分失败泄漏、`run_node_script_async` 缺 wait_for 可永久挂死房间线程）；Web 3（请求体无大小上限、密码 strip 三处口径不一可致认证配置永久自锁、行内注释保留逻辑污染含 `#` 的配置值）；HTTP 4（sync_http 内网跳转缺口/HTTPError 无上限/data-json 分叉、async_http 钩子内同步 getaddrinfo）；弹幕 3（singleflight 异常未脱敏、在途登记不注销、SRT 失败静默丢且告警链不触发）；选源 2（`_PRIVATE_HOST_PATTERN` 字面量缺口、room.py 裸 AsyncClient 跟随重定向）；spider 2（浪Live/映客/京东 MID-2212 同族残留、xhs sid 重定向外送）；main 1（磁盘满恢复后 `running_list` 永久残留致全部房间不再拉起）；GUI 1（`_save_text_to_file` 弱化原子写，POSIX 下还原 0600——SEV-2211 同族）；构建 CI 6（softprops/paths-filter 浮动 ref×最高权限、check_annotations 主目录防护方向反、冒烟不排空管道/不断言存活、一次性脚本 ROOT 硬编码）；前端 1（语言切换清空已渲染配置表单）。测试 14：恒真断言（test_http_config:153、test_proxy:149）、替身打到进程级本体（configparser/ctypes/time.sleep/httpx/loguru）、前端三包装缺 node 侧 skipped 校验（`{skip:true}` 全链路假绿）、沙箱缺 sessionStorage 致 token 主路径零覆盖、MID-2253/2238 文本锁可逃逸等 |
+| 机扫交叉（Mimosa） | scanId `scan-2026-09-30T02-25-56.161Z-3255898c38d0`、seal `sha256:5350da9801cb…d78a1`、深度 deep、证据边界 static_only、状态 **inconclusive**（198/198 文件解析、threatModel 未建全、validation 阶段 investigated=0——41 条均为未验证静态发现）：HIGH 命令注入 3 / 硬编码凭据 3 / 路径穿越 11 / SSRF 7 + LOW 随机数 17。逐条人工复核：0 条构成人工未见的可利用漏洞（2 条与人工发现重合互证——node 版本号零校验、sync_http 内网复检缺失；其余为模式误报或设计内公共客户端标识）；机扫选取面未覆盖 standalone——最重的 S-01/S-02 由人工深审找出 |
+| 报告结构与行动项 | 报告含审查概述/范围/统计矩阵/严重 2 项与中等 51 项逐项详述（问题+影响分析+修复建议）/轻微 160 项分区域表格/机扫复核表/P0-P2 修复优先级/流程性建议（「孪生回灌」硬约定提案、R1 名单补 configparser 与 `_SANCTIONED` 登记、standalone 回灌专项）/总结结论；「待确认」条目 10 余项需真机或特定环境复现后再定级 |
+| 文档与门禁 | 本批为纯文档产出：新增 `CODE_REVIEW_2026-09-30.md`（根目录；`.dockerignore` 已有 `CODE_REVIEW_*.md` 通配、不入镜像）+ 本条目（中英同步），零代码改动；按「完成定义」豁免：第 1 步门禁不适用（无 `.py`/前端资产改动）、第 2 步真机验证不适用（不触碰录制链路/选源/ffmpeg 参数）、第 3/5 步不适用（无回归锁改动、未产生一次性脚本） |
+| 交回用户 | P0 修复队列五组见报告第 8 章（standalone 孪生回灌、脱敏死分支、Web 认证自锁与配置值污染、`replace_url` 误伤与磁盘恢复拉起、GUI 原子写）；standalone 建议单独立项做「回灌对齐」专项 |
+
+### v4.4.0-dev (2026-09-30) — `AGENTS.md` 与工作区对账（7 项事实同步）+ 冗余量化后只做信息保真精简：本批净 +529 字节（精简类操作 −170 B，事实同步 +699 B）
+
+> 用户口径：扫描工作区 → 按 `git status`/`git diff` 识别自上次提交以来的增删改 → 回写 `AGENTS.md` 受影响配置 → 在此之上精简。
+> 工作区实测：`git status --porcelain` 仅 5 条 `M`（`AGENTS.md`/`CODE_WIKI.md`/`CODE_WIKI_EN.md`/`docs/agent-reference/session-learnings.md`/`pyproject.toml`），
+> **0 新增、0 删除、0 未跟踪**（`filter.lfs.*` 已配置，不影响 status 采集）；对账基准 HEAD `046bb73`。
+> `pyproject.toml` 本批只改 `[tool.pytest.ini_options].filterwarnings` 两条**注释归因**、零取值变更 → `AGENTS.md` 无需随动（运行时依赖 21 条与 `requirements.txt` 已复核相等）。
+
+| 项 | 内容 |
+| --- | --- |
+| 事实同步 7 项（均给实测判据） | ① 「开发/构建/GUI 依赖」`.[dev]` 由「pytest/black/isort/mypy」补全为**六条**（另 `pytest-asyncio`、`pytest-cov`，与 `pyproject [project.optional-dependencies].dev` 逐项核对）；② `tests/test_scheduler.py`「16 用例」→ **29**、`tests/test_record_failure_feedback.py`「5 用例」→ **8**（`pytest --collect-only -q`）；③ 已知坑里的符号名 `_allow_sleep` **不存在**，`src/scheduler.py` 实为模块级 `_sleep`（:531）与 `_now()`（:525）；④ 「6 处 `check_subprocess(...)`」→ **1 处**（`main.py:3595`；F-01 收敛后各平台分支只填 `ctx.record_danmaku_args`，现 52 处赋值，`grep -c` 实测）；⑤ `_loads_dict`「约 40 处调用」→ **103 处**（`grep -c '_loads_dict(' src/spider.py` = 104 行含 1 处定义）；⑥ 「产物体积大头」中 `pydantic_core` 4.93MB 与「合计约 24MB」随 `046bb73` 移除 fastapi/pydantic 失效，且本机无 `dist/` 可复测 → 读数外迁、根文件只留「三项固定成本」约束；⑦ 复核为**真**、未改动的读数：`BARE_JSON_LOADS_CEILING = 1`、`tests/test_ci_retry_action.py` 真 bash 行为锁 8 格、`test_twin_agrees_on_every_criterion_combination` 9 格矩阵、web_api 路由 24 条、`_FFMPEG_FAST_FAIL_SECONDS = 20.0`、`_PROBE_LEASE_SECONDS = 60.0`、`_PROBE_BACKOFF_PLATFORMS`/`_FLV_FIRST_PLATFORMS = ("虎牙直播",)`、ci.yml consts（black 26.5.1 / isort 9.0.1 / mypy 2.3.1 / pytest 9.1.1 / python 3.14 / node 24）、actions v7、`release-guard`、R7/R8、两条元数据回归锁、`MIN-2241` 的 `\r?\n\r?\n` 锚点、`test_motion.mjs` 5 条锁 |
+| 冗余量化（先测后改） | 体积一律按**原始文件字节（CRLF 形态）**计：HEAD `046bb73` 515 行 / 107 227 B → 本会话进场 517 行 / 109 009 B（含上一批未提交的三条门禁口径条目）→ 本批结束 **518 行 / 109 538 B**。本批两组操作的实测拆分：精简类 −170 B（`PYTHONUTF8` 两条合一 −39 B、`subprocess`+`FakePopen` 合一 **+33 B**——合并时补了「`__class_getitem__` 不可省」的因果框架文字，故不降反升、须如实记；collector 两条合一 −175 B、体积读数外迁使根文件 −137 B、两条新指针 +148 B），事实同步类 +699 B（7 项实测读数与 `[历史注]`）。机检结果：trailing whitespace **0** 行、逐字重复行 **1**（两段清理脚本各含同一 `Where-Object`，属刻意并列非冗余）、加粗小标题重复 **0** 处、连续空行段 **8**（均 ≤3 行）、113 条 >200 字符 bullet 与 `CODE_WIKI.md`+`CODE_WIKI_EN.md` 的 25 字 shingle 重叠 >50% 者 **0** 条、bullet 之间重叠 >40% 者 **0** 对。**结论：本文件已无「冗余重复表述」可删**（约 41% 字节是回归锁与约束本体，即事实源本身）；要再降体积只能压缩「更正考古」或继续外迁读数，两类都改信息形态而非删重复，须先获批准 |
+| 信息保真操作（唯一可行的三类） | 合并同主题条目 **3 处**：「`PYTHONUTF8=1` 告警即失败」与「父进程转发 / `errors="replace"`」两条并为一条（MID-63、「重复实现于 6 处」、`run_gates.ensure_utf8_streams()`、`_guard_stdio_encoding_policy`、`gui._install_crash_sink()` 全留）；「patch `main.py` subprocess」与「`FakePopen` 须带 `__class_getitem__`」并一条；「双模式 collector 的 `int(sys.argv)` 两步守卫」与「执行体须包在 `__main__` 内」并一条（四条模板约束改 ①②③④ 编号，20.55 秒 / 退出码 5 / 4 errors during collection 三处读数逐字保留） |
+| 外迁 + 指针修复 | 体积 MB 读数与 `pydantic_core` 失效史外迁到 `docs/agent-reference/measured-evidence.md` 新小节「产物体积大头读数」（该文件判据：句中不得出现祈使式约束，已核对）；同时修复**根文件失去入口**的两份子文档——`measured-evidence.md` 与 `lock-classification.md` 早已外迁但 `AGENTS.md` 无指针（此前只剩 `project-structure.md` 挂着），现各补一条引用式链接（`[体积读数]`、`[锁分类快照]`） |
+| 信息零丢失自证 | 与 HEAD 逐类比对并被 `measured-evidence.md` 兜住后：`test_*` 标识符 **69 → 69（丢失 0）**、MID/SEV/MIN/CVE/PYSEC/GHSA 编号 **19 → 19（丢失 0）**、`UPPER_SNAKE` 常量 **77 → 77（丢失 0）**；反引号片段丢失 5 个均为同物改写（`_now`→`_now()`、`libcrypto/libssl`→`libcrypto`/`libssl`、`record_danmaku_args`→`ctx.record_danmaku_args`、`basedpyright tests/` 为上一批已删除的错误口径、`__main__` 由枚举短句并入完整 `if __name__ == "__main__": main()`） |
+| 门禁 | `python scripts/run_gates.py` → **8/8 全绿（41.1s）** + 尾部兜底 **3653 passed 且 warnings summary 为空（194.5s）**，退出码 0；`run_gates.py --list` 仍解析出 **8 条**且首条逐字为 `python -m black --check --diff --line-length 120 --target-version py314 .`（章节标题/围栏/`PYTHONUTF8=1` 行首前缀均未动）；三条文档锁 `tests/test_run_gates.py` + `tests/test_regression_2026_09_22_gates.py` + `tests/test_check_annotations.py` = **73 passed / 1 skipped / 0 警告（36.57s）**；`AGENTS.md` 行尾形态 **CRLF 518 / 裸 LF 0**、`measured-evidence.md` 仍纯 CRLF、`session-learnings.md` 仍纯 LF。另记一条副作用：跑完全量门禁（含尾部 pytest）后 `git status --porcelain` 多出**已跟踪**的 `config/config.ini`——`[GUI]` 前一个空行被配置回写路径吞掉，属用例副作用而非本批意图改动；因恢复已跟踪文件归用户决定，未擅自 `git restore`，列为 N-4 |
+| 未复跑项与理由 | `scripts/check_coverage.py` 与 `basedpyright` 本批**未重跑**：本轮零 `.py`/`.sql`/前端资产改动（纯 `.md`），二者结论沿用同日实测（44 模块全部达阈 / 191 文件 0 error 0 warning）；另 `check_coverage.py` 需 `pytest --cov=src` 的 coverage 数据，而 `run_gates.py` 的兜底跑法不带 `--cov`，此刻重跑只会落「无数据 rc=2」的假信号 |
+| 真机验证 | **未执行**：本批不触碰录制链路 / 选源 / ffmpeg 参数 / 平台解析，按「完成定义」第 2 步豁免；仅执行第 1（受影响部分）/4/6 步 |
+| 仍需人工处理（编号，交回用户） | **N-1** 陈旧注释残留「FastAPI」三处：`.github/workflows/ci.yml:6`、`.github/workflows/ci.yml:606`、`docker-compose.yaml:100`——`fastapi` 已随 `046bb73` 移除，面板为 Starlette 直接驱动；纯注释改动，未动以免越出「只改 `AGENTS.md`」授权范围。**N-2** `scripts/compile_po.py:136-137` 写的是 `reconfigure(encoding="utf-8")` 而**未给 `errors`**，与 `AGENTS.md`「任何 `reconfigure` 显式给 `errors`」这条自家约束相违（省略会把错误处理器重置为 `strict`，同 MID-63 事故族）；修复须配回归锁，未擅自改维护脚本。**N-3** 上一批遗留两项派生元数据问题仍未决：`src/proto/douyin_pb2.pyi` 是否列入 `[tool.setuptools.package-data]`、`.[dev]` 下限是否抬至 CI 钉定值 |
+
+### v4.4.0-dev (2026-09-30) — 全量门禁复核（191 个源文件 / 3653 条用例）：代码面零缺陷，`AGENTS.md` 三条门禁口径修正
+
+> 用户要求对工作空间全部 Python 代码跑完整质量检查与测试。结论：**black / isort / mypy（宿主 + `--platform linux` 双跑）/ basedpyright / pyright / pytest / 逐模块覆盖率七个面全绿，业务代码零改动**；本轮唯一落盘的代码库改动是 `AGENTS.md` 的三条门禁口径条目。
+
+| 项 | 内容 |
+| --- | --- |
+| 门禁读数 | `python scripts/run_gates.py` → 8/8 PASS（45.3s）+ 尾部 pytest 兜底「3653 passed 且 warnings summary 为空」（190.5s，与独立一次 `pytest --cov=src -q` 的 3653 passed / 14 skipped 相互印证）；`scripts/check_coverage.py` → 44 模块全部达阈（总 84.69%，`src/proto/douyin_pb2.py` 8.7% 属显式豁免的 protoc 生成物）；`basedpyright` 不传路径 → 191 文件 0 error/0 warning（旧口径 `basedpyright tests/` 的 126 文件亦 0/0）；`pyright` 1.1.414 显式传 `[tool.mypy].files` 同集合路径 → 191 文件 0/0，裸跑 → 205 文件（多出的 14 份即 `typings/` 存根）同样 0/0 |
+| `AGENTS.md` 更正 1 | 「测试 → 质量门禁（须保持）」原写「black/isort/mypy 三条（路径换成 `tests/`）」，与本文件「`mypy` 不带路径参数」互斥——显式传参会覆盖 `[tool.mypy].files`、等于自行缩小覆盖面。改为引用「格式化命令（门禁唯一基准）」一节，判定口径（0 警告 / 全绿 / 0 error 0 warning）逐字不变 |
+| `AGENTS.md` 更正 2 | 「basedpyright（本地补充门禁，CI 不跑）」补 `pyright` 与 Pylance 的定位：`pyright` 只是 basedpyright 的引擎基座、**不是第三条门禁**；Pylance 无命令行入口，「Pylance 已查过」不得充当门禁证据；本仓没有 `[tool.pyright]` 配置段，裸跑 `pyright` 的扫描面大于 `[tool.basedpyright]` 的排除口径 |
+| `AGENTS.md` 新增 | 「格式化命令」补一条可外推前提：本地 black/isort/mypy/pytest 版本须与 `ci.yml` consts 钉定值逐一同值，否则结论必须标注「本地口径，未经 CI 同版本验证」。实测差异一项：**isort 本机 9.0.2 vs CI 钉定 9.0.1**（black 26.5.1 / mypy 2.3.1 / pytest 9.1.1 同值）。未擅自改 workflow 常量、未重装 venv 依赖（后者按「风险控制（前置）」属用户通道） |
+| 14 条 skip 归因 | 全部为环境形态限制、非失败：Windows 语义 4（`tests/test_proxy.py:199`、`tests/test_regression_2026_09_22_utils.py:178`、`tests/test_utils.py:574`、`tests/test_run_gates.py:218`）；符号链接特权缺失 3（`tests/test_ffmpeg_path_preference.py:262`、`tests/test_web_api.py:2137`/`:2157`，WinError 1314）；本机 `h2` 可用故构造期缺依赖分支不可达 1（`tests/test_regression_2026_09_22_net.py:681`）；平台无文档化离线形态 6（`tests/test_spider_hardening.py:198`） |
+| 真机验证 | **未执行**：本轮零代码改动（纯文档），按「完成定义」豁免条款只做第 1/4/6 步；录制链路未被触碰 |
+| 文档锁自证 | 改完 `AGENTS.md` 后复跑依赖该文件的三条文档锁 `tests/test_run_gates.py` + `tests/test_regression_2026_09_22_gates.py` + `tests/test_check_annotations.py` = 73 passed / 1 skipped；「格式化命令」bash 块的解析与条数锁未受影响（新增条目均落在围栏之外）；`AGENTS.md` 行尾形态复核为 CRLF 517 / 裸 LF 0（与 HEAD 同形态，未被编辑打混） |
+
+### v4.4.0-dev (2026-09-30) — pyproject.toml 与工作区变更对账（依赖 / 派生元数据 / 包清单 / 排除清单四项）：取值零改动，仅更正 `filterwarnings` 两条注释的归因
+
+**背景**：按「扫描工作区 → 识别自上次提交以来的增删改 → 回写受影响的 pyproject 配置」口径复核。工作树对 HEAD 干净，故对账基准取未推送的 `046bb73`（该批移除 fastapi / pydantic）。
+
+| 复核项 | 判据（本机实测） | 结论 |
+| --- | --- | --- |
+| 运行时依赖集合 | `pyproject [project.dependencies]` 21 条 ↔ `requirements.txt` 剥行内注释后 21 条；`tests/test_regression_2026_09_22_gates.py` 27 passed | 已随 `046bb73` 同步，无需改 |
+| 派生产物 | `python scripts/sync_metadata.py --check` | OK：`uv.lock` 内已无 fastapi/pydantic 节点，egg-info 版本与依赖均同步 |
+| 未声明的第三方 import | AST 扫全仓 243 个 `.py` 顶层 import 与声明集合对账（脚本走 stdin，不落盘） | 产品码零缺口；`fastapi`/`pydantic` 仅残留在 `.workbuddy/tmp/` 的旧快照备份，该目录已在各工具排除清单内 |
+| 包清单 | `src/` 子包仍只有 `platforms` / `proto`；根目录 6 个 `.py` 全在 `py-modules` 与 `[tool.mypy].files`；本批新增文件落 `src/`、`tests/`、`web/`、`docs/worklog/` | `packages` / `py-modules` / `package-data` 均无需改 |
+| 排除清单同源 | black / isort / mypy / coverage / basedpyright 五侧与 `.coveragerc-concurrency` 的 omit 逐项一致；`tests/`、`docs/`、`web/` 下无新增 `.py` 资产目录 | 无需改 |
+
+**实际改动（仅注释）**：`[tool.pytest.ini_options].filterwarnings` 两条归因更正——
+
+- 第一条**承重**：带 `-W default::UserWarning` 跑 `tests/test_web_api.py` 时 warnings summary 恰落 1 条，发出方是 `starlette/testclient.py` 本体（类别 `StarletteDeprecationWarning`，为 `UserWarning` 子类）；原注释记作「fastapi testclient 内部 import」，已被 `046bb73` 证伪。
+- 第二条在现装组合（starlette 1.7.0 + anyio 4.15.1）下**实测不触发**：带 `-W always::DeprecationWarning`（命令行 `-W` 覆盖 ini 过滤）跑 `test_web_api.py` + `test_web_api_routes.py` 得 163 passed 且 summary 为空，starlette 三处引用已全走 `anyio.from_thread.BlockingPortal`。仍保留不删——声明下限 `starlette>=1.3.1` 区间的形态未经本机构验。
+
+**门禁**：`check_version.py` PASS、`sync_metadata.py --check` OK、`pytest tests/test_regression_2026_09_22_gates.py tests/test_web_api.py` = 190 passed / 2 skipped / 0 警告；另核 TOML 可解析与全文件 ≤120 列。
+**真机验证**：未执行——本批不涉及录制链路 / 选源 / ffmpeg 参数 / 平台解析，按 DoD 第 2 步豁免。
+**未随本批改动（交回用户）**：① `src/proto/douyin_pb2.pyi`（2026-08-18 起存在）未列入 `[tool.setuptools.package-data]`，wheel 是否收录未实测（本机无已安装发行包、无 `.whl` 可核），需真构建再判；② `[project.optional-dependencies].dev` 下限（pytest>=7.0.0 / mypy>=1.5.0 / pytest-asyncio>=0.21.0）与 `ci.yml` consts 钉定值（pytest 9.1.1 / mypy 2.3.1 / black 26.5.1）落差较大，是否抬至 CI 同值待定。
+
+**同日追加（经用户批准的单独一项）**：`AGENTS.md`「依赖管理」条原写「23 条」——该读数已被 `046bb73`（移除 `fastapi`/`pydantic`）证伪。本轮先因该文件正被并行编辑而未动，用户单独下达指令后改为「21 条，2026-09-30 复核：`fastapi`/`pydantic` 随阶段2 移除后由 23→21」，并把先前 2026-09-26 的 21→23 读数改写为「已被该移除推翻」的历史注（旧事实与常量名逐字保留，不删）。改后复测：`AGENTS.md` 行尾形态仍为 CRLF 517 / 裸 LF 0；读该文件的三条文档锁 `tests/test_run_gates.py` + `tests/test_regression_2026_09_22_gates.py` + `tests/test_check_annotations.py` = 73 passed / 1 skipped / 0 警告（「格式化命令」bash 块解析与命令条数不受影响，本次改动落在围栏之外）。
+
 ### v4.4.0-dev (2026-09-30) — 审查报告三项「待决策」落地（1-A 同步探针内网收口 / 2-A retry 按退出码分档 / 3-A 真机脚本模板门禁）+ 一道防「变异验证未还原」的机检
 
 > 上一批（CODE_REVIEW_2026-09-29_2 修复）收尾时留下三条需用户决策的残余缺口，本轮按批准的 1-A / 2-A / 3-A 组合全部落地。

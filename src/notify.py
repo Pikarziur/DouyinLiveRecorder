@@ -321,12 +321,17 @@ def clear_record_info(record_name: str, record_url: str) -> None:
 
 
 # 房间线程退出时从运行列表移除 record_url 并把监控计数减一（幂等：已被 clear_record_info
-# 移除时为无操作）；进程整体退出（exit_recording=True）时跳过，避免与全局清理竞争；无返回值
+# 移除时为无操作）；无返回值
+# M-01（2026-09-30）：原实现把 exit_recording=True 一律当「进程整体退出」跳过清理——但磁盘满
+# 暂停同样置位该标志（main.py 磁盘限制块），房间线程在暂停期退出时 URL 永久残留 running_list，
+# 空间恢复后主循环的「not in running_list」拉起条件恒假，所有房间不再被拉起（恢复日志宣称
+# 「继续按配置拉起房间」与实际行为相反）。清理在 record_state_lock 内幂等执行，真进程退出
+# 路径（safe_exit）上多跑一次无害（进程随即消亡），故不再按 exit_recording 分流。
 def remove_room_from_running(record_url: str) -> None:
-    # 兜底清理：覆盖「停止录制」（recording_enabled=False）与线程意外退出路径——
+    # 兜底清理：覆盖「停止录制」（recording_enabled=False）、磁盘满暂停与线程意外退出路径——
     # 线程退出后运行列表若残留该 URL，主循环会误判「仍在运行」而不再重新拉起，
     # 重新开始录制后该房间将永久失联
-    if main.exit_recording or not record_url:
+    if not record_url:
         return
     with main.record_state_lock:
         if record_url in main.running_list:

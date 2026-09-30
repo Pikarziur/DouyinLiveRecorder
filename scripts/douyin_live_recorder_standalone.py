@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import ipaddress
 import json
 import math
 import os
@@ -177,14 +178,39 @@ class ProbeResult:
         return (self.headers.get("content-type") or "").lower()
 
 
+# 显式协议白名单 handler 集（S-01，2026-09-30）：与主程序 src/sync_http.py 的定稿同构。
+# build_opener 即使显式传入 ProxyHandler，默认 Handler 集合（含 FileHandler/FTPHandler/
+# DataHandler）**仍然生效**——file:// 会被本地读出 200，与「平台 API 候选属不可信输入面」
+# 叠加成「候选 → 探针 → ffmpeg 读本地文件」的完整利用链。现只显式注册 http/https 相关
+# handler，白名单外协议经 UnknownHandler 统一抛 URLError('unknown url type: …')，响应体
+# 一步都不读。UnknownHandler 必须保留：它是白名单外协议的统一拒绝口。
+# 残余缺口（登记，与主线同边界）：DNS 重绑定窗口不在本层闭合。
+_HTTP_ONLY_HANDLERS: tuple[type[urllib.request.BaseHandler], ...] = (
+    urllib.request.UnknownHandler,
+    urllib.request.HTTPHandler,
+    urllib.request.HTTPDefaultErrorHandler,
+    urllib.request.HTTPRedirectHandler,
+    urllib.request.HTTPErrorProcessor,
+)
+
+
 def _build_opener(proxy: str | None) -> urllib.request.OpenerDirector:
     # proxy 显式传入时代理该地址；**未传时用空 ProxyHandler 屏蔽系统/环境代理**——
     # urllib 的默认 opener 会读取 http_proxy/ALL_PROXY 等环境变量，导致「配置说直连、
     # 实际走了系统代理」的隐性行为。代理策略必须只由配置文件决定(与原工程 httpx
     # proxy=None 直连语义对齐)。
+    # S-01（2026-09-30）：[历史注] 原经 build_opener 构造——默认 Handler 集合不受显式
+    # ProxyHandler 影响，file/ftp/data 三类协议全部可读；改按上方白名单手工组装
+    # （HTTPSHandler 仍为必挂实参，http/https 是本项目仅有的两类出站协议）。
+    opener = urllib.request.OpenerDirector()
     if proxy:
-        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.add_handler(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    else:
+        opener.add_handler(urllib.request.ProxyHandler({}))
+    for klass in _HTTP_ONLY_HANDLERS:
+        opener.add_handler(klass())
+    opener.add_handler(urllib.request.HTTPSHandler())
+    return opener
 
 
 def http_request(
@@ -287,6 +313,129 @@ def dig(obj: Any, *keys: Any, default: Any = None) -> Any:
 def strip_query(url: str) -> str:
     # 去掉 URL 的 query 部分(用于日志脱敏与退避键)。
     return url.split("?", 1)[0]
+
+
+# --- 不可信流地址候选的协议/目标判定(S-01，2026-09-30) ---
+#
+# 平台 API 响应是不可信输入面(恶意/被劫持代理、接口投毒、MITM 都可能改写候选)，
+# 候选在进探针与 ffmpeg 命令之前必须先过这道闸。与主程序 src/web_config.py 的
+# _host_internal_reason / _internal_ip_reason 同判据的**离线子集**：不解析 DNS
+# (与主线派生跳判定同一边界，DNS 重绑定窗口不在本层闭合)，只做「协议白名单 +
+# IP 字面量(含 inet_aton 缩写形态) + 内部用途主机名」三类零 DNS 判定。
+
+# 内部用途主机名(离线即可定罪)：云元数据端点与本机/内网集群常用名
+_INTERNAL_HOST_EXACT = frozenset(
+    {"localhost", "metadata", "metadata.google.internal", "metadata.goog", "metadata.tencentyun.com"}
+)
+_INTERNAL_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
+# CGNAT 100.64.0.0/10 在 3.14 的 ipaddress 里已不算私网(与主线同口径)，显式列出
+_CGNAT_V4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _parse_aton_part(part: str) -> int | None:
+    # 单段解析：十进制 / 0x 十六进制 / 前导 0 八进制（与主线 web_config._parse_aton_part 同形；
+    # int(part, 0) 会把 0177 这类前导零形态当非法抛 ValueError，不能用它）
+    if not part:
+        return None
+    low = part.lower()
+    if low.startswith("0x"):
+        digits, base, allow = part[2:], 16, "0123456789abcdef"
+    elif part[0] == "0" and len(part) > 1:
+        digits, base, allow = part[1:], 8, "01234567"
+    else:
+        digits, base, allow = part, 10, "0123456789"
+    if not digits or any(ch not in allow for ch in digits.lower()):
+        return None
+    try:
+        return int(digits, base)
+    except ValueError:
+        return None
+
+
+def _ipv4_from_aton(host: str) -> ipaddress.IPv4Address | None:
+    # 把 inet_aton 允许但 ipaddress 拒绝的缩写形态（2130706433 / 0177.0.0.1 / 127.1 /
+    # 0x7f.0.0.1）还原成规范 IPv4。这些形态最终都会被 glibc/Windows 的解析器还原为
+    # 127.0.0.1，必须在**本层**同款归一，不能指望「看起来不像 IP 就交给 DNS」——那会
+    # 先被当作主机名放行。（与主线 web_config._ipv4_from_aton 同形）
+    parts = host.split(".")
+    n = len(parts)
+    if not 1 <= n <= 4:
+        return None
+    last_index = n - 1
+    total = 0
+    for i, part in enumerate(parts):
+        value = _parse_aton_part(part)
+        if value is None:
+            return None
+        if i < last_index:
+            # 非末段各占一个字节（大端序），末段可独占剩余 1~4 个字节
+            if value > 255:
+                return None
+            total |= value << (8 * (3 - i))
+        elif value >= 1 << (8 * (5 - n)):
+            return None
+        else:
+            total |= value
+    try:
+        return ipaddress.IPv4Address(total)
+    except ValueError:
+        return None
+
+
+def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    # 主机名为 IP 字面量时返回可判定的地址对象，否则返回 None(与主线 web_config._parse_ip_literal 同形)
+    name = host.split("%", 1)[0]  # 去 IPv6 的 %zone(fe80::1%eth0 与 fe80::1 是同一目标)
+    if not name:
+        return None
+    try:
+        return ipaddress.ip_address(name)
+    except ValueError:
+        return _ipv4_from_aton(name)
+
+
+def _internal_ip_reason(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    # 返回 None 表示可放行；否则给出拒绝理由(写进日志)。判据与主线 _internal_ip_reason 同族，
+    # 独立发行版按「永不允许本机/内网目标」收口(无主线代理/SMTP 场景的 allow_local_targets 变体)。
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        # ::ffff:127.0.0.1 这类 IPv4 映射地址必须按其承载的 v4 判定，否则 v6 侧一律「公网」
+        return _internal_ip_reason(mapped)
+    if addr.is_loopback:
+        return f"回环地址({addr})"
+    if addr.is_unspecified:
+        return f"未指定地址({addr})"
+    if addr.is_link_local:
+        return f"链路本地地址({addr})"
+    if addr.is_private:
+        return f"私网地址({addr})"
+    if addr.is_multicast:
+        return f"组播地址({addr})"
+    if addr.is_reserved:
+        return f"保留地址({addr})"
+    if addr.version == 4 and addr in _CGNAT_V4_NETWORK:
+        return f"CGNAT 网段({addr})"
+    return None
+
+
+def _untrusted_stream_target_reason(url: str) -> str | None:
+    # 返回 None 表示候选可放行；否则给出拒绝理由。三段判定顺序与主线一致：
+    # 协议白名单最前 → IP 字面量(含缩写形态) → 内部用途主机名。
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "URL 解析失败"
+    if parts.scheme.lower() not in ("http", "https"):
+        return f"协议不在白名单({parts.scheme or '空'})"
+    host = parts.hostname or ""
+    if not host:
+        return "缺少主机名"
+    literal = _parse_ip_literal(host)
+    if literal is not None:
+        return _internal_ip_reason(literal)
+    lowered = host.lower()
+    if lowered in _INTERNAL_HOST_EXACT or any(lowered.endswith(suffix) for suffix in _INTERNAL_HOST_SUFFIXES):
+        return f"内部用途主机名({lowered})"
+    return None
 
 
 # --- 协议 MD5(RFC 1321 纯 Python 实现) ---
@@ -1256,6 +1405,12 @@ def validate_stream_url(
     #   2. flv/record_url：HEAD 通过后必须 GET 复核，杜绝 HEAD=200/GET=403 假绿；
     #   3. 末位候选(last_resort)稳定拒绝时仅告警放行，交由 ffmpeg 定夺；
     #   4. 虎牙(退避白名单)线路在退避窗口内跳过全部探针：非末位回退、末位零探针放行。
+    # S-01：协议/目标违规的候选不做探针、也不吃 last_resort 放行——「末位候选仅告警放行」
+    # 的对象是 CDN 拒绝类误杀，不是本地文件/内网/云元数据目标。
+    _target_reason = _untrusted_stream_target_reason(url)
+    if _target_reason is not None:
+        warn(f"流地址校验拒绝(不可信目标): {strip_query(url)} - {_target_reason}")
+        return False
     headers = record_headers(platform, cookies)
     if _probe_in_backoff(url, platform):
         if last_resort:
@@ -1353,6 +1508,16 @@ def select_source_url(stream: StreamInfo, proxy: str | None = None) -> str | Non
     seq = [u for u in seq if "h265" not in u.lower()]
     if rec and "h265" not in rec.lower():
         seq.append(rec)
+    # S-01(2026-09-30)：不可信候选(协议不在白名单/指向本机/内网/云元数据)先丢弃再探针——
+    # 绝不交给探针与 ffmpeg。逐条留日志(带 strip_query 后的地址)保证「候选为何没录」可归因。
+    trusted: list[str] = []
+    for cand in seq:
+        reason = _untrusted_stream_target_reason(cand)
+        if reason is not None:
+            warn(f"丢弃不可信流地址候选({reason}): {strip_query(cand)}")
+            continue
+        trusted.append(cand)
+    seq = trusted
 
     for idx, cand in enumerate(seq):
         last = idx == len(seq) - 1
@@ -1462,6 +1627,12 @@ def build_ffmpeg_cmd(
         header_str,
         "-rw_timeout",
         "15000000",
+        # 输入协议白名单(S-01，2026-09-30)：与主程序 main.py::_build_ffmpeg_input_args 逐字同值。
+        # 本项目输入恒为 http(s)/rtmp 直播流，file 从不使用；放行 file 意味着「URL 可控」时
+        # ffmpeg 可读写本地文件(平台 API 候选属不可信输入面)。crypto 需保留(HLS 分片解密)。
+        # 两处命令定义点(本列表 + run_ffmpeg 内联列表)必须同值同位(-i 之前)。
+        "-protocol_whitelist",
+        "rtmp,crypto,http,https,tcp,tls,udp,rtp,httpproxy",
         "-reconnect_delay_max",
         "60",
         "-reconnect_streamed",
@@ -1492,6 +1663,29 @@ def build_ffmpeg_cmd(
         _eof_idx = cmd.index("-reconnect_at_eof")
         del cmd[_eof_idx : _eof_idx + 2]
     return cmd
+
+
+def _mask_ffmpeg_cmd_for_log(cmd: list[str]) -> str:
+    # S-02(2026-09-30)：写进 logs/ffmpeg.log 的命令原文必须脱敏。完整命令含 -headers 实参
+    # (record_headers 会把用户配置的平台 Cookie 拼进去——抖音/B站登录态会话凭据)与 -i 的
+    # 带 token 流地址(wsSecret/anti_code/auth 等)；该日志 append 无轮转，凭据明文落盘等于
+    # 泄漏(与主程序「写入日志前必须脱敏」红线同源，主程序从不落盘完整命令)。只保留参数
+    # 形状供排障：-headers 值换占位符，-i 值走 strip_query(保留路径、去 query)。
+    masked: list[str] = []
+    i = 0
+    while i < len(cmd):
+        token = cmd[i]
+        if i + 1 < len(cmd) and token == "-headers":
+            masked += [token, f"<headers:{len(cmd[i + 1])} chars>"]
+            i += 2
+            continue
+        if i + 1 < len(cmd) and token == "-i":
+            masked += [token, strip_query(cmd[i + 1])]
+            i += 2
+            continue
+        masked.append(token)
+        i += 1
+    return " ".join(masked)
 
 
 # 运行中的 ffmpeg 进程登记表：Ctrl+C / 停止时统一终止，避免孤儿 ffmpeg
@@ -1540,7 +1734,7 @@ def run_ffmpeg(
     # shell=False——不经 shell 解释，URL/文件名中的元字符(&、|、> 等)不可能被注入命令
     # (文件名已在 clean_name 清洗)。该列表即 build_ffmpeg_cmd 规范列表之外的第二处定义点，
     # 两处必须逐字对齐、改任一处即同步另一处，m3u8 移除 -reconnect_at_eof 的守卫同样两处都要。
-    cmd_log = " ".join(build_ffmpeg_cmd(ffmpeg_bin, url, out_path, platform, cookies, duration, fmt))
+    cmd_log = _mask_ffmpeg_cmd_for_log(build_ffmpeg_cmd(ffmpeg_bin, url, out_path, platform, cookies, duration, fmt))
     headers = record_headers(platform, cookies)
     header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
     duration_cap = str(int(duration)) if duration > 0 else _RECORD_UNLIMITED_CAP
@@ -1562,6 +1756,9 @@ def run_ffmpeg(
             header_str,
             "-rw_timeout",
             "15000000",
+            # 输入协议白名单(S-01，2026-09-30)：与 build_ffmpeg_cmd 逐字同值，理由见该函数注释
+            "-protocol_whitelist",
+            "rtmp,crypto,http,https,tcp,tls,udp,rtp,httpproxy",
             "-reconnect_delay_max",
             "60",
             "-reconnect_streamed",

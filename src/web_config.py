@@ -1174,12 +1174,17 @@ def update_config_line(config_file: str | Path, section: str, key: str, value: s
                 if m:
                     prefix = m.group(1)  # "key = " 部分
                     old_tail = m.group(2)  # 原值（可能含行内注释）
-                    # 检测行内注释：首个 " #" 或 " ;"（前置空白），保留注释部分。
-                    # 2026-09-12 修复（CODE_REVIEW_FIX_1 F-23）：改为**引号优先**。原实现一律按首个
-                    # " #" / " ;" 切分——值本身含该串时会被当成注释，写回后变成「新值 + 半个原值」，
-                    # 配置被静默截断；典型受害者是颜色值、含井号的密码/token、URL 锚点（`key = "v" # x`
-                    # 之后任何含 " #" 的值都会错位）。引号包裹的值其注释必在**闭合引号之后**，按此切分
-                    # 可精确定界；引号未闭合（畸形行）或值无引号时回落原启发式，行为不退化。
+                    # 检测行内注释：仅「引号定界」一种可信形态。2026-09-12 修复（CODE_REVIEW_FIX_1
+                    # F-23）：原实现一律按首个 " #" / " ;" 切分——值本身含该串时会被当成注释，
+                    # 写回后变成「新值 + 半个原值」，配置被静默截断；典型受害者是颜色值、含井号的
+                    # 密码/token、URL 锚点。引号包裹的值其注释必在**闭合引号之后**，按此切分可精确定界。
+                    # M-07（2026-09-30）：无引号值的 " #" / " ;" 启发式回落分支整体移除——读侧
+                    # configparser 从未开启 inline_comment_prefixes，旧值里的 " #" 本就是**值的
+                    # 一部分**（「configparser 读到的完整旧值」恒等于全尾串，与「剥离注释后的
+                    # 前半段」永远对不上），把该尾串拼回新值等于二次写入静默污染（读回值 ≠ 新值，
+                    # 平台 Cookie/含井号 token 等凭据莫名失效且无从排查）。同理，闭合引号**之前**
+                    # 的 " #" 一律属值本身：带引号且值含 " #"、无尾注的行（`key = "a #b"`）不再
+                    # 落进回落启发式二次污染。
                     inline_comment = ""
                     _stripped_tail = old_tail.lstrip()
                     if _stripped_tail[:1] in ('"', "'"):
@@ -1188,12 +1193,6 @@ def update_config_line(config_file: str | Path, section: str, key: str, value: s
                         _q_end = old_tail.find(_quote, _q_start)
                         if _q_end > 0:
                             inline_comment = old_tail[_q_end + 1 :]
-                    if not inline_comment:
-                        for marker in (" #", " ;"):
-                            idx = old_tail.find(marker)
-                            if idx > 0:  # >0 表示前面有非空内容（不是行首注释）
-                                inline_comment = old_tail[idx:]
-                                break
                     # 保留原行尾换行符：先判 \r\n 再判 \n（CRLF 行同样以 \n 结尾，
                     # 顺序反了会把 CRLF 行降级成 LF，往 CRLF 文件里混入异风格行尾）
                     eol = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")

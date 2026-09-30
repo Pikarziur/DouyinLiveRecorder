@@ -147,6 +147,12 @@ Flextv/PopkonTV/Twitch/LiveMe/Faceit 共 9 个海外平台的解析分支全部�
 
 2026-09-19 沉淀：把「审查全量源码」拆成 6~7 个模块组并行深读时，必须在每个子任务的 prompt 里写明本项目的刻意约定白名单（`#` 行注释不用 docstring、`except A, B:` 为 PEP 758 风格、line-length 120、四语 i18n、弹幕与视频链路解耦等），否则子代理会把刻意风格大面积误报为问题。同时要求每条结论附 `文件:行号` + 逐字符原文片段（≤12 行）+ 置信度，并在汇总前逐条回源复核严重项——这一步能筛掉「凭常识推测项目存在某问题」的臆测条目（本次实测：子代理给出的 14 项疑似问题经复核确认均不成立，已单列「已核实但不构成问题」章节）。
 
+## 产物体积大头读数
+
+2026-09-24 定稿口径（`scripts/report_bundle_size.py` 本机实跑，PyInstaller onedir 产物）：`python314.dll` 6.47MB、`libcrypto`/`libssl` 合计 7.22MB（HTTPS）、`pydantic_core` 4.93MB（FastAPI）、Tcl/Tk 5.28MB（GUI），四项合计约 24MB。
+
+[历史注] 其中 `pydantic_core` 一项随 2026-09-29 阶段2 移除 fastapi/pydantic 后不再是固定成本，「合计约 24MB」随之失效；本节留存的是当时的原始读数，新读数由 `scripts/report_bundle_size.py` 本机复测后追加。
+
 ## 与根文件的分工
 
 - 根文件保留条目的**约束与结论**并就地链接本文件对应小节；本文件只保留**支撑该结论的原始读数**，一字未改。

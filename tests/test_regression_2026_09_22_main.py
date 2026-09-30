@@ -638,6 +638,30 @@ class TestDiskLimitedRecoverable:
         assert {"disk_limited", "exit_recording"} <= declared, "磁盘限制的可逆复位没有写回模块全局"
 
 
+class TestDiskFullPauseCleanupStillRuns:
+    # M-01（2026-09-30）：磁盘满暂停置位 exit_recording 后退出的房间线程也必须清 running_list。
+    # 旧实现把 exit_recording=True 一律当「进程整体退出」跳过清理 → 暂停期退出的房间永久残留
+    # running_list，空间恢复后主循环的「not in running_list」拉起条件恒假，全部房间不再被拉起。
+    # 行为锁（真实现 + 真 record_state_lock）：reset 语义属于 SEV-2206 那侧，本类只锁「清理不再
+    # 被 exit_recording 拦下」这半个不变量。
+    def test_room_thread_cleanup_survives_disk_full_pause(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import src.notify as notify_module
+
+        monkeypatch.setattr(main, "exit_recording", True)
+        monkeypatch.setattr(main, "running_list", ["https://room.example/1", "https://room.example/2"])
+        monkeypatch.setattr(main, "monitoring", 2)
+        notify_module.remove_room_from_running("https://room.example/1")
+        assert main.running_list == ["https://room.example/2"], "磁盘满暂停期退出的房间未从 running_list 清理"
+        assert main.monitoring == 1, "移除房间时未同步扣减监控计数"
+        # 幂等：已被 clear_record_info 或上一轮移除的 URL 再次传入为无操作
+        notify_module.remove_room_from_running("https://room.example/1")
+        assert main.running_list == ["https://room.example/2"]
+        assert main.monitoring == 1
+        # 空串 URL 不做任何事（守卫保留）
+        notify_module.remove_room_from_running("")
+        assert main.running_list == ["https://room.example/2"]
+
+
 class _QuietLogger:
     # 磁盘块 exec 时注入的静默 logger（生产代码里的告警不该刷进测试输出）
     def __getattr__(self, name: str) -> Any:

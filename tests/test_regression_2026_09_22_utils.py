@@ -61,6 +61,15 @@ _CAMEL_LEAK_CASES: list[tuple[str, str]] = [
     ("https://p.example/a.flv?csrfToken=LEAKCSRF&t=1", "LEAKCSRF"),
     # 请求头形态的驼峰键（Authorization 已覆盖，这里锁 wsAuth 的 header 写法）
     ("wsAuth: LEAKHEADERWSAUTH", "LEAKHEADERWSAUTH"),
+    # M-17（2026-09-30）：header 形态、整段键名不在 _SECRET_KEYS 黑名单、只能靠驼峰边界分支
+    # 命中的复合键。修复前 _SECRET_HEADER_RE 的 guard 错挂在驼峰分支上（与 (?<=[a-z]) 同位置
+    # 互斥、分支恒死），这三条全部明文落日志；修复后值必须消失。
+    ("myToken: LEAKHEADERMYTOK", "LEAKHEADERMYTOK"),
+    ("sessionKey: LEAKSESSKEY", "LEAKSESSKEY"),
+    ("newCamelKey: LEAKNEWCAMELHDR", "LEAKNEWCAMELHDR"),
+    # M-17 配套边界（2026-09-30）：shell 命令串里的带引号 header——键名前恰是引号，
+    # 独立参数分支不得加 quote 排除（排除即此形态重新漏抹，tests/test_notify_script_guard.py 全组同证）
+    ('--header "Authorization: Bearer LEAKQUOTEDBEARER"', "LEAKQUOTEDBEARER"),
     # JSON 体形态的驼峰键：键名整体被引号包裹、边界由闭合引号给出，故该形态不需要驼峰边界分支
     # （(?i) 下 "accessToken" 与 "accesstoken" 同形）——与下面 _PUBLIC_UNTOUCHED 的
     # design/presigned 反向棘轮分属两条判据，改任一形态须两边同看。

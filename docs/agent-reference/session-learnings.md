@@ -186,3 +186,40 @@ Qoder CN 发行版的实际数据根（`.qoder-cn`）不一致，属外部工具
 - **往文档写「本批新增/修复了 X」之前先 `git show HEAD:<file>` 核对**：我把 collector 既有的 `status: SKIP` +
   `reason: room_offline` 行为写成了本批新增，`git diff` 里根本没有该 hunk。归因错误比缺文档更贵，因为它会把
   后来者的排查方向带偏。
+- **Git Bash 的 `/tmp` 与 Windows Python 的 `/tmp` 不是同一个目录**：bash 里 `tool > /tmp/x.json` 落在
+  `C:\Users\<user>\AppData\Local\Temp\x.json`，而随后 `.venv/Scripts/python.exe -c "open('/tmp/x.json')"` 会把它
+  解析成 `C:\tmp\x.json` 并抛 `FileNotFoundError`——形状与「工具压根没产出」一模一样，极易误判成 basedpyright/pyright
+  没跑。判据：跨 bash 与 Windows Python 传文件一律先 `cygpath -w` 取绝对路径、再以 argv 传进 `-c`（不要硬编码 `/tmp`），
+  或者全程留在 bash 侧用 `grep`/`tail` 读。
+- **`run_gates.py` 尾部的 pytest 兜底不是「卡死」**：它跑完 8 条 `--check` 门禁（本仓实测 45.3s）之后还会自己起一次
+  `python -m pytest -q` 判 warnings summary（本仓实测 190.5s），期间门禁输出停在 `[OK]` 行、后台任务输出文件仍为空。
+  中途据此判「没跑完」或另起一份 pytest，只会造成两份全量并发、给计时敏感用例添噪声；要么等通知，要么用
+  `Get-CimInstance Win32_Process` 看是否真有 `-m pytest -q` 在跑。
+- **本机 basedpyright / pyright 已就绪，DoD 第 1 步不再欠账**：`.venv/Scripts` 内实测 basedpyright 1.40.1（基于
+  pyright 1.1.414），不传路径跑 `[tool.basedpyright]` 口径为 191 文件 0 error/0 warning；此前两轮记为「未安装、交回用户」
+  的读数已作废。Pylance 只有 IDE 语言服务器、没有 CLI，任何「Pylance 已查」的表述不得当作门禁证据（该定位已落 `AGENTS.md`）。
+- **改 `AGENTS.md` 前只需盯两处读者**：全仓只有 `scripts/run_gates.py` 解析「格式化命令」下的**第一个** ```bash 围栏
+  （`## 格式化命令` 须顶格、行首 `NAME=value` 前缀、命令里不得残留 `#`、`Remove-Item`/`find .` 不得进该围栏），
+  以及 `tests/test_run_gates.py` + `tests/test_regression_2026_09_22_gates.py` 两个文件真读该文件；其余 22 个提到 AGENTS 的
+  测试文件只是注释里点名、不读内容。判据命令：`python scripts/run_gates.py --list`（须 ≥7 条且首条逐字为
+  `python -m black --check --diff --line-length 120 --target-version py314 .`）+ 那三条文档锁。
+- **「精简 AGENTS.md」这类要求先量化冗余再动手，结论往往是「没有冗余可删」**：本轮实测 HEAD `046bb73` 为 515 行 / 107,227 B（按
+  CRLF 原始字节计，文本模式读回再编码会少算 515 B——写体积数字前必须先说清算哪一种），进场时 517 行 / 109,009 B，收尾 518 行 /
+  109,538 B。机检结果：trailing whitespace 0 条、逐字重复行仅 1 条（两段清理脚本里的同一条 `Where-Object`，刻意并列非冗余）、加粗
+  小标题重复 0 处、113 条 >200 字符 bullet 与 CODE_WIKI(zh+en) 的 shingle 重叠 >50% 的有 0 条、bullet 互相 >40% 重叠的有 0 对。
+  剩下约 41% 字节是回归锁与约束本体，删它等于删事实源。可做的三类操作因此收敛为：合并同主题条目、压缩「更正考古」、把一次性
+  实测读数外迁 `docs/agent-reference/measured-evidence.md`。本轮实测：精简类三处合并加一处外迁净 **−170 B**（其中 subprocess 与
+  `FakePopen` 合一反而 +33 B，因合并时补了因果框架文字——如实记），7 项事实同步 **+699 B**，全批净 **+529 B**。
+- **文档里的用例数 / 调用点数 / 符号名一定漂移，改动前先取一次实读**：本轮抓到 5 处——`tests/test_scheduler.py`
+  16→29、`tests/test_record_failure_feedback.py` 5→8（均 `pytest --collect-only -q`）、「6 处 `check_subprocess` 调用」
+  →1 处（F-01 收敛后各平台只填 `ctx.record_danmaku_args`）、`_loads_dict`「约 40 处」→104 行、`src/scheduler.py` 的
+  `_allow_sleep` 实为 `_sleep`。反方向的准确读数也存在：`BARE_JSON_LOADS_CEILING = 1`、retry 真 bash 行为锁 8 格、
+  arm64 让位 9 格矩阵、web_api 路由 24 条全部复核为真，不要一律怀疑。
+- **外迁出去的参考文档会失去入口**：`docs/agent-reference/measured-evidence.md` 与 `lock-classification.md` 早已由
+  「已知坑」外迁，但根文件里的指针在某次编辑中丢了（只剩 `project-structure.md` 还挂着）——外迁必须同批在根文件留
+  引用式链接，否则后来会话按根文件检索时当「不存在」处理。
+- **跑全量 pytest 会就地改写已跟踪的 `config/config.ini` 基线模板**：2026-09-30 实测——进场时 `git status --porcelain` 只有 5 条 `M`，跑完 `scripts/run_gates.py`（含尾部全量 pytest）后多出 `config/config.ini`，diff 是 `[GUI]` 前一个空行被吞掉，形态与 `read_config_value` 缺键补写 / `_atomic_write_text` 回写完全一致。后果不是脏 diff 而是**污染唯一事实源**：该文件是脱敏基线模板，运行期写入的空白/键序漂移会进提交，且 `.gitignore` 对已跟踪文件无效。判据：跑全量门禁前后各记一次 `git status --porcelain`；多出该文件即按「恢复基线模板」处置（`git restore config/config.ini`），不要把它当成用户改动带进提交。
+- **并行派发 Agent 受并发上限约束，实测约 5 个**：2026-09-30 全仓审查曾一次消息并行派 18 个 Agent，仅 5 个成功，其余全部报 `user concurrency limit exceeded` / `model concurrency limit exceeded` 且不自动重试；改为每批 3-5 个、共 6 批串行派发后 18 个全部完成。批量审查/批量任务类工作直接按 3-5/批派发，不要赌上限，也不要为凑并发把 prompt 压缩到失真。
+- **`scripts/douyin_live_recorder_standalone.py` 是安全修复的「回灌盲区」**：主线 2026-09-12/09-20/09-29 的协议白名单（`main.py:3466`）、同步探针内网判定、MID-49 斗鱼签名 POST、`ffmpeg_proc` 三级终止四轮修复全部未回灌该独立副本——2026-09-30 全仓审查仅有的两条严重（SSRF/file:// 探测录制链、ffmpeg 命令含 Cookie 落盘 `logs/ffmpeg.log`）都在它身上；现有 9 格孪生矩阵锁只覆盖 PATH 让位判据一项。主线安全/正确性修复落地时必须逐项核对该文件，并在提交信息写明「已回灌 / 刻意不回灌及原因」。
+- **审查报告的修复建议本身也要当假设验证，且修完必须跑全量 pytest 而非只跑触碰面**：2026-09-30 P0 批次，M-17 按报告字面建议把 `_SECRET_HEADER_RE` 的 `(?<![A-Za-z0-9"'])` guard「移到 plain 分支」，触碰面用例全绿；全量 pytest 却在看似无关的 `tests/test_notify_script_guard.py` 抓出 8 红——shell 命令串 `--header "Authorization: Bearer X"` 的键名前恰是引号，quote 排除让带引号 header 形态整体漏抹（该形态此前由 plain 分支无 quote 排除地兜住）。正确修法：驼峰分支摘掉恒死 guard 即可，plain 分支保持与查询串形态逐字同构；「guard 防 https: 误抹」的旧注释在当前键名表下已被证伪（无键名可匹配 `https:`，`_PUBLIC_UNTOUCHED` 恒绿）。复盘：① 报告条目的「修复建议」列是建议不是事实源，落地前先枚举该正则的既有消费形态（带引号 header 正是被忽略的那个）；② 回归锁要补「修的方向」与「别把既有行为修没」两个方向（本次在 `_CAMEL_LEAK_CASES` 同时加了驼峰复合键与带引号 header 两类）。
+- **CRLF 仓里做变异验证/字节级改写，锚点必须 CRLF 感知，且 Bash heredoc 不可靠**：`src/utils.py` 是纯 CRLF 文件，用 `\n` 拼的锚点两次 `not found`；即便带引号定界符，Bash 工具层也会吃掉 heredoc 里的双反斜杠转义（脚本里写两个反斜杠+n，到达 Python 时已折成一个）。可靠做法：把变异脚本经 Write 工具写成 `%TEMP%` 下的临时 .py（内容原样落盘），`chr(92)` 构造反斜杠、`"\r\n".join(lines)` 拼块，跑完删脚本并在 finally 里断言 `read_bytes()` 与原字节相等。

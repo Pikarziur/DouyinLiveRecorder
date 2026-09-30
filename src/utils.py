@@ -753,6 +753,37 @@ def jsonp_to_json(jsonp_str: str) -> OptionalDict:
         raise Exception("No JSON data found in JSONP response.")
 
 
+# 段级精确替换（2026-09-12 审查 6.1 引入；2026-09-30 M-18 由 config_io._rewrite_line_by_match
+# 下沉为此处唯一实现——utils.replace_url 与 config_io.update_file 必须同一匹配口径，而
+# config_io 依赖 utils、反向导入会成环，故实现只能住在 utils 侧，config_io 保留同名薄封装）。
+# old_str 仅在「等于整行（去行尾换行与首尾空白后）」或「等于行内某个半角/全角逗号分隔段（strip 后）」
+# 时才替换为 new_str；返回重写后的整行文本（保留原行尾与多逗号），未命中返回 None。
+# 原实现是整行 str.replace，URL 前缀重叠时（.../room1 与 .../room12）会把别的配置行静默改坏，
+# 使用者只在下次「未生效」时才发现。
+def rewrite_line_by_segment(text_line: str, old_str: str, new_str: str) -> str | None:
+    raw = text_line.rstrip("\r\n")
+    eol = text_line[len(raw) :]
+    target = old_str.strip()
+    if not target:
+        return None
+    # 整行匹配：raw.strip() 同时容忍首尾空白；两种命中形态都要 rstrip 掉 new_str 自带的
+    # 换行，否则与补上的 eol 拼成双换行
+    cleaned_new = new_str.rstrip("\r\n")
+    if raw.strip() == target:
+        return f"{cleaned_new}{eol}"
+    # 段级匹配：按半角/全角逗号切分并保留分隔符。new_str 允许含逗号（"new_url,主播: 名称"），
+    # 与原 substring 语义兼容，又不会误伤相似前缀行
+    parts = re.split(r"([,，])", raw)
+    hit = False
+    for i in range(0, len(parts), 2):
+        if parts[i].strip() == target:
+            parts[i] = cleaned_new
+            hit = True
+    if not hit:
+        return None
+    return "".join(parts) + eol
+
+
 def replace_url(file_path: str | Path, old: str, new: str) -> None:
     # 替换文件中的 URL：逐行匹配整行内容，避免子串替换误伤包含相同 URL 片段的其他行。
     # MID-29：本函数是花椒「地址失效自动注释」的唯一写盘路径（spider.py 直接调用），原先既不持
@@ -762,6 +793,10 @@ def replace_url(file_path: str | Path, old: str, new: str) -> None:
     # 改动。现与 config_io 同型：持锁 + 原子写。
     # newline=""：读不翻译行尾、写回原样，避免一次替换把整份 URL_config.ini 的 CRLF 永久改成 LF
     # （与 config_io.update_file / delete_line 的 MI-11 口径一致）。
+    # M-18（2026-09-30）：匹配口径从「整行相等才换、否则子串 replace」改为段级精确匹配
+    # （rewrite_line_by_segment，与 config_io.update_file 同一份实现）。原先口径的 elif
+    # `old in line` 是无边界子串替换——数字 ID 前缀重叠的两行（…/l/123456 与 …/l/1234567）
+    # 在「地址失效自动注释」时会把兄弟房间整行 replace 成「#短URL+长号尾巴」静默禁用。
     with _url_config_write_lock():
         try:
             with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
@@ -779,13 +814,12 @@ def replace_url(file_path: str | Path, old: str, new: str) -> None:
             return
         out_lines: list[str] = []
         for line in lines:
-            stripped = line.rstrip("\r\n")
-            # 末行无行尾时补 \n（与改前的 open("w") 写法语义一致，不引入新的差异形态）
-            eol = line[len(stripped) :] or "\n"
-            if stripped.strip() == old:
-                out_lines.append(new + eol)
-            elif old in line:
-                out_lines.append(line.replace(old, new))
+            rewritten = rewrite_line_by_segment(line, old, new)
+            if rewritten is not None:
+                # 末行无行尾时补 \n（与改前的 open("w") 写法语义一致，不引入新的差异形态）
+                if not rewritten.endswith("\n"):
+                    rewritten += "\n"
+                out_lines.append(rewritten)
             else:
                 out_lines.append(line)
         _ = atomic_write_text(file_path, "".join(out_lines), encoding="utf-8-sig")
@@ -917,16 +951,23 @@ _SECRET_QUERY_RE = re.compile(
     + r"))=))[^&\s\"']+"
 )
 # 形态二：请求头 Name: value（Authorization: Bearer xxx 这类值含空格，故整段抹到分隔符）。
-# 键名前缀与形态一同构；`(?<![A-Za-z0-9"'])` 是**必需**的：缺了它，裸名 `key`/`sign` 会在
-# `https:` 这类「键名右端非字母」的位置命中，把 URL 的 scheme 整段抹掉（实测
-# `https://live.douyin.com/…` 被抹成 `***//live.douyin.com/…`）。冒号前字符集与形态一的 `=` 前对称。
+# 键名前缀与形态一同构（同一组边界常量、同一 (?i) 包法）；冒号前字符集与形态一的 `=` 前对称。
 # 值取到 , ; 引号 或行尾为止——分隔符集合与 http/JSON 的常见写法对齐。
+# M-17（2026-09-30）：原实现在驼峰分支上追加了一道 `(?<![A-Za-z0-9"'])` guard——驼峰分支自身
+# 要求「前字符是小写字母」（(?<=[a-z])），guard 却要求「前字符不是字母数字」，同一位置互斥
+# → 驼峰分支恒不匹配（死代码），请求头形态的驼峰复合键（myToken: xxx / sessionKey: xxx）
+# 整值明文落日志。修复 = 从驼峰分支摘掉这道 guard，三分支与查询串形态**逐字同构**。
+# 两条配套边界（2026-09-30 复核）：① 独立参数分支**不得**追加 quote 排除——shell 命令串里的
+# 带引号 header（`--header "Authorization: Bearer X"`）键名前恰是引号，排除它会让 Bearer 值
+# 重新漏抹（tests/test_notify_script_guard.py 全组是这条的回归锁）；② 「guard 防 https: 被
+# 裸名分支误抹」的旧表述在当前键名表下不成立（无键名可匹配 `https:`，_PUBLIC_UNTOUCHED
+# 反向棘轮恒绿），该历史结论按「被证伪」不再保留 guard。
 _SECRET_HEADER_RE = re.compile(
     r"((?:(?:"
     + _SECRET_PLAIN_BOUNDARY
     + r"|"
     + _SECRET_CAMEL_BOUNDARY
-    + r"(?<![A-Za-z0-9\"'])|"
+    + r"|"
     + _SECRET_LOWER_COMPOUND_BOUNDARY
     + r")(?i:(?:"
     + _SECRET_KEY_ALT

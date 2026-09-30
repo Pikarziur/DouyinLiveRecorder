@@ -117,8 +117,8 @@
 
 ## 依赖管理
 
-- **运行时依赖**: `pyproject.toml [project.dependencies]` 与 `requirements.txt` 保持同步（23 条，2026-09-26 复核：`h2`/`socksio` 于 2026-09-23 补入后由 21→23，两侧包名集合逐项相等）。
-- **开发 / 构建 / GUI 依赖**: `pip install .[dev]`（pytest/black/isort/mypy）/`.[build]`（PyInstaller>=6.10.0）/`.[gui]`（customtkinter/pystray/Pillow）；三者均不进运行时清单。
+- **运行时依赖**: `pyproject.toml [project.dependencies]` 与 `requirements.txt` 保持同步（21 条，2026-09-30 复核：`fastapi`/`pydantic` 随阶段2（2026-09-29）移除后由 23→21，两侧包名集合逐项相等；前一次 2026-09-26 复核的读数 23 系 `h2`/`socksio` 于 2026-09-23 补入使 21→23，已被该移除推翻）。
+- **开发 / 构建 / GUI 依赖**: `pip install .[dev]`（pytest / pytest-asyncio / pytest-cov / black / isort / mypy 六条）/`.[build]`（PyInstaller>=6.10.0）/`.[gui]`（customtkinter/pystray/Pillow）；三者均不进运行时清单。
 - **i18n 依赖**: PyYAML（zh_TW.yaml 加载；缺失时仅损失 YAML 格式）。
 - **版本下限（须与 `requirements.txt` 和 `pyproject.toml [project.dependencies]` 三处一致）**: `pystray>=0.19.5`、`Pillow>=12.3.0`、`customtkinter>=6.0.0`。
 - **安全下限（清单只写下限，抬下限消除「声明区间含已知受影响版本」风险）**: `starlette>=1.3.1`（CVE-2026-48710 受影响 <=1.0.0；PYSEC-2026-2280/2281 修复于 1.1.0；PYSEC-2026-248/249 修复于 1.3.0/1.3.1，旧下限 1.0.1 仍在受影响段，2026-09-21 已二次抬升）、`urllib3>=2.7.0`（显式声明，requests 传递依赖且同步出站 HTTP 穿过它，CVE-2026-44431）、`h2>=4.4.1`（PYSEC-2026-3628 / GHSA-6hr6-w5qg-qmwg 重复 Host 头致请求走私，OSV `introduced=0`/`fixed=4.4.1`，旧下限 4.3.0 只修同源 PYSEC-2026-1435，2026-09-26 由 `deps-audit`「下限复核」抓出）。`python-multipart>=0.0.32`、`requests>=2.34.2` 均已高于修复版本。`pip-audit` 属 CI 审计工具，**不得**进 `requirements.txt`/`[project.dependencies]`。新增/上调下限时跑一次 `deps-audit`。
@@ -128,7 +128,7 @@
 ## 测试
 
 - **pytest 配置**（`pyproject [tool.pytest.ini_options]`）: `testpaths=["tests"]`、`python_files=["test_*.py"]`、`python_classes=["Test*"]`、`python_functions=["test_*"]`、`asyncio_mode="auto"`。
-- **质量门禁（须保持）**: `pytest`（0 警告）+ black/isort/mypy 三条（路径换成 `tests/`）+ `basedpyright tests/`（0 error/0 warning；basedpyright 为本地补充门禁）。
+- **质量门禁（须保持）**: 命令一律取「格式化命令（门禁唯一基准）」一节，**不得在此重述路径参数**（旧条目写的「black/isort/mypy 三条路径换成 `tests/`」与本文件「`mypy` 不带路径参数」直接冲突——显式传参会覆盖 `[tool.mypy].files`，等于缩小覆盖面）。判定口径不变：`pytest` 0 警告 + black/isort/mypy 全绿 + `basedpyright` 0 error/0 warning（本地补充门禁，见其专节）。
 - **pytest「0 警告」口径**: warnings summary 为空（0 条）。第三方库告警一律经 `pyproject.toml [tool.pytest.ini_options].filterwarnings` 显式 ignore 并附来源注释；**禁止用 filterwarnings 掩盖项目自身告警**，禁止给用例加宽泛过滤。协程类 RuntimeWarning 由 GC 延迟触发、ignore 拦不住——必须修根因（见「已知坑」跨循环关闭 AsyncClient）。
 - 覆盖率源码 `src/`、排除 `tests/`/`__pycache__/`/`node/`/`ffmpeg/` 等（与 `.gitignore`/`.dockerignore`/pyproject 同源）；门禁：`python scripts/check_coverage.py`（阈值事实源 `MODULE_THRESHOLDS`）。
 - **前端用例（`tests/frontend/*.mjs`）**: Node 内置 `node:test` + `node:vm` 沙箱驱动 `web/app.js`，零 npm 依赖；由同名 Python 包装用例以子进程 `node --test` 调用，Node 缺失时 skip。新增前端用例沿用「`.mjs` 真用例 + `.py` 包装」双文件结构。
@@ -139,10 +139,8 @@
 ### 测试编写强制约定
 
 - **环境变量一律用 `monkeypatch.setenv/delenv`，禁用 `patch.dict(os.environ)`**: `patch.dict` 整体快照 `os.environ`，harness 注入的 `CODEBUDDY_MCP_CONFIG` 膨胀超 32767 上限写回即抛 `ValueError`。`monkeypatch` 只动单个 key。已有 `_clear_proxy_env(monkeypatch)` helper。
-- **patch `main.py` 的 subprocess 必须替换 main 的全局引用**: 禁 `monkeypatch.setattr(main.subprocess, "Popen", ...)`（会波及 harness 守护线程）。正确：`shim = types.SimpleNamespace(**vars(subprocess))` → `shim.Popen = FakePopen` → `monkeypatch.setattr(main, "subprocess", shim)`。
-- **FakePopen 必须是类且定义 `__class_getitem__`**: `check_subprocess` 内层 `proc: subprocess.Popen[bytes]` 在 `def` 时求值（`main.py` 未启用 `from __future__ import annotations`）。
-- **双模式测试脚本须带 `int(sys.argv)` 守卫，且必须是两步式（只判非选项不够）**: `tests/test_*_live_collector.py`（bili/douyin/douyu/huya/twitch 共 5 个）既可独立运行也被 pytest 收集。AGENTS 早先写的单行式 `SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else N` **已被实测证伪**：`pytest a.py b.py` 一次点多个文件时 `sys.argv[2]` 是下一个测试文件的路径，它不带 `-` 前缀、只判非选项会放行，随后 `int(路径)` 抛 ValueError、该模块收集直接 ERROR（2026-09-30 实测 4 errors during collection）。定稿形态一律拆两步：`_SECONDS_RAW = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else ""` → `SECONDS = int(_SECONDS_RAW) if _SECONDS_RAW.isdigit() else N`。四条模板约束（`__main__` 守卫 / 模块级零副作用 / 本条 argv 守卫 / 清理输出目录必须按平台前缀 + 先判类型）已由 `tests/test_test_hygiene.py` 的 R7 逐条 AST 机检，新增真机脚本逃不掉。
-- **真机 collector 脚本的执行体必须在 `if __name__ == "__main__": main()` 内**: 模块级语句在 pytest **收集期**就会执行——`pyproject` 的 `python_files=["test_*.py"]` 会 import 每个 `test_*` 文件，于是真连平台、`time.sleep(20)`、清空 `tests/_out_live`、并在失败路径 `sys.exit(1)` 直接终止收集，确定性污染全量运行与 CI（S-2 实测红态：`--collect-only` 耗时 20.55 秒 / no tests collected / 退出码 5）。**取证口径**：`python -m pytest tests/<脚本> --collect-only -q` 必须秒级返回且 collected ≥ 1；五个脚本一律带守卫结构锁。
+- **patch `main.py` 的 subprocess 必须替换 main 的全局引用，且 `FakePopen` 必须是类并定义 `__class_getitem__`**: 禁 `monkeypatch.setattr(main.subprocess, "Popen", ...)`（会波及 harness 守护线程）。正确：`shim = types.SimpleNamespace(**vars(subprocess))` → `shim.Popen = FakePopen` → `monkeypatch.setattr(main, "subprocess", shim)`。`__class_getitem__` 不可省：`check_subprocess` 内层 `proc: subprocess.Popen[bytes]` 在 `def` 时求值（`main.py` 未启用 `from __future__ import annotations`）。
+- **真机 collector 脚本（`tests/test_*_live_collector.py`，bili/douyin/douyu/huya/twitch 共 5 个）是「独立运行 + pytest 收集」双模式，四条模板约束缺一即污染全量运行与 CI**（由 `tests/test_test_hygiene.py` 的 R7 逐条 AST 机检）: ① 执行体必须包在 `if __name__ == "__main__": main()` 内——`pyproject` 的 `python_files=["test_*.py"]` 会 import 每个 `test_*` 文件，模块级语句在**收集期**就真连平台、`time.sleep(20)`、清空 `tests/_out_live`、失败路径 `sys.exit(1)` 直接终止收集（S-2 实测红态：`--collect-only` 耗时 20.55 秒 / no tests collected / 退出码 5）；② 模块级零副作用；③ `int(sys.argv)` 守卫必须两步式——AGENTS 早先的单行式 `SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else N` **已被实测证伪**（`pytest a.py b.py` 一次点多个文件时 `sys.argv[2]` 是下一个测试文件的路径，不带 `-` 前缀、只判非选项会放行，`int(路径)` 抛 ValueError、该模块收集直接 ERROR，2026-09-30 实测 4 errors during collection），定稿形态 `_SECONDS_RAW = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else ""` → `SECONDS = int(_SECONDS_RAW) if _SECONDS_RAW.isdigit() else N`；④ 清理输出目录必须按平台前缀 + 先判类型。**取证口径**：`python -m pytest tests/<脚本> --collect-only -q` 必须秒级返回且 collected ≥ 1；五个脚本一律带守卫结构锁。
 - **替身禁止裸赋值共享模块属性；进程级 stdlib 替身必须走被测模块命名空间的 shim**: `spider.async_req = fake` 不还原会让同会话后续任何带 `data=` 的调用撞上残缺假签名（M-25）；`monkeypatch` 解析到的是**全进程唯一**的 os 本体，窗口内 loguru 与其它后台线程的删除/重命名一并被替换（M-27，其中一个替身还把删除变成 no-op）。正确形态：`types.SimpleNamespace(**vars(os))` → 只覆盖所需属性 → `monkeypatch.setattr(<被测模块>, "os", shim)`，与本文件 subprocess 的 shim 约定同构。
 - **变异验证的一次性改动必须当轮还原，并给改动行加 `MUTATION-<短id>` 标记**: 2026-09-30 实测事故——一个并行工作包在 `src/stream_select.py` 分片探测分支上做「摘掉 `except RedirectHopRejected: raise`」的变异，跑到轮次上限中断，把 `pass  # MUTATION-…` 原样留在了生产代码里。后果不是少一条注释：`seg_resp` 未赋值 → `UnboundLocalError` 被外层 `except Exception` 当「探测异常」吞掉 → 末位候选 `return True`，**内网地址被交给 `ffmpeg -i`**。这类残留对 black / mypy / 注释检查**三面全隐形**（语法合法、类型不报错、注释反而更多），只有用例真跑到那条分支才现形。硬约束三条：① 优先用「内存备份→改写→跑→按字节还原」的单进程手法，`finally` 里还原并断言 `read_bytes()==原字节`；② 必须留盘标记，收尾由 `tests/test_test_hygiene.py` 的 **R8** 全仓扫描（标记字面量在守卫内刻意拆写以免自指，且自带「遍历面 > 200 个文件」的防空转断言与磁盘级反向见证）；③ 并行工作包被中断时，接手方第一件事是 `grep -rn` 标记 + `compileall` + 门禁，而不是假设实现已完成。
 
@@ -194,8 +192,10 @@ docker compose up -d
 
 - **度量侧唯一入口**: `python scripts/report_bundle_size.py dist/DouyinLiveRecorder`（`--top N`/`--json F`/`--compare F`/`--strict`）。体积结论**只以本机实跑为准**，不估算。
 - **排除侧唯一入口**: `build_exe.py` 的 `BLOAT_EXCLUDES` 由 `SPEC_TEMPLATE` 生成 `excludes_bloat` 挂在**三个** Analysis 上（必须三处都挂，否则合并去重后等于没排）。新增排除项准入：① 指出运行期不可达；② 复测体积；③ 本地 `--smoke --no-runtime` 三入口通过。判据是「不可达」不是「看着没用」。
-- **已知体积大头（固定成本，不可删）**: `python314.dll` 6.47MB、`libcrypto/libssl` 7.22MB（HTTPS）、`pydantic_core` 4.93MB（FastAPI）[历史注：2026-09-29 阶段2 已移除 fastapi/pydantic，`pydantic_core` 不再为固定成本，体积待 `scripts/report_bundle_size.py` 本机复测后更新]、Tcl/Tk 5.28MB（GUI），合计约 24MB（其中 pydantic_core 一项待复测）。
+- **已知体积大头（固定成本，不可删）**: `python314.dll`、`libcrypto`/`libssl`（HTTPS）、Tcl/Tk（GUI）三项一律按固定成本对待。逐文件 MB 读数与 `pydantic_core` 口径失效史见 [体积读数]；新合计须本机复测后填写。
 - **已评估未采纳（勿重复提议）**: ① `strip=True`——Windows 无 strip 可执行文件；② `upx=True`——提高杀软误报率，本产物未签名。
+
+[体积读数]: docs/agent-reference/measured-evidence.md#产物体积大头读数
 
 ### CI / workflow 约定
 
@@ -237,8 +237,8 @@ python scripts/check_runtime_pins.py  # 只查结构；--strict（发布路径�
 - **`check_annotations.py` 不止查注释**: 常驻符号可达性检查，报告「引用了全仓都没有绑定的名字」（删除模块级函数/常量却留调用点的形态）。该命令在上方清单内，CI 与 `run_gates.py` 两侧都跑。
 - **本地一次性触发点**: `python scripts/run_gates.py` 按原顺序跑完全部 `--check` 型门禁（含条件增跑的 `mypy --platform linux`），任一失败非 0 退出；`--list`/`--only`/`--keep-going` 用于排障。脚本运行时解析本节 bash 块，**本节仍是唯一事实源**，禁止另建并行清单。给门禁写行尾注释安全，写行首注释会被整行跳过。
 - **一律显式传参**（`--line-length 120 --target-version py314`/`--profile black`）：配置会继承，但显式参数避免本地配置漂移造成「本地过、CI 挂」，也与 CI 逐字对齐。排除目录不需传（由 pyproject 生效）。
-- **`PYTHONUTF8=1` + 「告警即失败」（MID-63）**: isort 读文件用平台默认编码，GBK locale 下遇中文注释只发 `UserWarning: Unable to parse file …` 就**跳过该文件**、rc 仍 0——本地全绿、CI 也全绿，两侧都没查。两条配套约束：① `run_gates.py` 把行首 `NAME=value` 转子进程环境变量并对 stderr 中 `Unable to parse file` 判失败；② `ci.yml` 用 step 级 `env: PYTHONUTF8: "1"` + 独立 silent-skip 兜底步骤。
-- **`PYTHONUTF8` 必须同时覆盖子进程与转发输出的父进程，且 `reconfigure(encoding="utf-8")` 必须显式写 `errors="replace"`**（同一条 CPython 规定：只传 `encoding` 不传 `errors` 会把错误处理器重置为 `'strict'`）: ① `run_gates.py` 逐行读子进程 stderr 再写自己 stdout，中文 Windows 下本进程 stdout 是 cp936，black 通过时 emoji 行会让转发语句抛 `UnicodeEncodeError` 炸掉门禁进程，现由 `run_gates.ensure_utf8_streams()` 修根因——`errors="replace"` 只是兜底，**不得**改用「只判断退出码」或「过滤 emoji」绕过。② 本仓「Windows 控制台 UTF-8 补丁」重复实现于 6 处，`build_exe._ensure_utf8_streams()` 曾漏写 `errors`，而 `tests/test_build_exe.py` 在 pytest 进程内调 `build_exe.main()`，于是 pytest 的 fd 捕获包装器被就地翻成 strict，非 UTF-8 字节落进捕获文件后在会话收尾读回时抛 `UnicodeDecodeError`。③ 配套约束三条：任何 `reconfigure` 显式给 `errors`；`tests/conftest.py` 的 `_guard_stdio_encoding_policy` 逐用例校对 `(encoding, errors)`，宿主进程编码策略属框架资产、用例不得改；`gui._install_crash_sink()` 仅 `__name__ == "__main__"` 时装进程级钩子。
+- **本地门禁可外推的前提：工具版本与 `ci.yml` consts 钉定值逐一同值**: `run_gates.py` 以 `sys.executable -m black/-m isort` 与 venv 内 `mypy` 起子进程，故「本地全绿」只有在 black/isort/mypy/pytest 版本与 CI 的 `black_version`/`isort_version`/`mypy_version`/`pytest_version` 相等时才等于「CI 会绿」。任一项不一致时，报告必须写明「本地口径，未经 CI 同版本验证」并列出差异项（2026-09-30 全量核查：black 26.5.1 / mypy 2.3.1 / pytest 9.1.1 同值，isort 本机 9.0.2 对 CI 钉定 9.0.1 差一个补丁位）。**不得**为凑同值擅自改 workflow 常量或批量重装 venv 依赖（后者见「风险控制（前置）」）。
+- **`PYTHONUTF8=1` 必须同时覆盖子进程与转发输出的父进程，且「告警即失败」同回路判定（MID-63）**: ① isort 读文件用平台默认编码，GBK locale 下遇中文注释只发 `UserWarning: Unable to parse file …` 就**跳过该文件**、rc 仍 0——本地与 CI 都没查。两条配套：`run_gates.py` 把行首 `NAME=value` 转子进程环境变量并对 stderr 中 `Unable to parse file` 判失败；`ci.yml` 用 step 级 `env: PYTHONUTF8: "1"` + 独立 silent-skip 兜底步骤。② `reconfigure(encoding="utf-8")` 必须显式写 `errors="replace"`（同一条 CPython 规定：只传 `encoding` 不传 `errors` 会把错误处理器重置为 `'strict'`）；`run_gates.py` 逐行读子进程 stderr 再写自己 stdout，中文 Windows 下本进程 stdout 是 cp936，black 通过时 emoji 行会让转发语句抛 `UnicodeEncodeError` 炸掉门禁进程，现由 `run_gates.ensure_utf8_streams()` 修根因——`errors="replace"` 只是兜底，**不得**改用「只判断退出码」或「过滤 emoji」绕过。③ 本仓「Windows 控制台 UTF-8 补丁」重复实现于 6 处，`build_exe._ensure_utf8_streams()` 曾漏写 `errors`，而 `tests/test_build_exe.py` 在 pytest 进程内调 `build_exe.main()`，于是 pytest 的 fd 捕获包装器被就地翻成 strict，非 UTF-8 字节落进捕获文件后在会话收尾读回时抛 `UnicodeDecodeError`。④ 配套约束三条：任何 `reconfigure` 显式给 `errors`；`tests/conftest.py` 的 `_guard_stdio_encoding_policy` 逐用例校对 `(encoding, errors)`，宿主进程编码策略属框架资产、用例不得改；`gui._install_crash_sink()` 仅 `__name__ == "__main__"` 时装进程级钩子。
 - **门禁「告警即失败」推广口径**: 新增门禁若存在「跳过/降级只发 warning、退出码仍 0」形态（isort `Unable to parse file`/coverage「无数据」/pytest warnings summary），必须同回路判失败，否则写明该门禁不自证覆盖。
 - **`mypy` 不带路径参数**: 见「代码风格」mypy 条目。
 
@@ -246,6 +246,7 @@ python scripts/check_runtime_pins.py  # 只查结构；--strict（发布路径�
 
 - 命令：`basedpyright`（不传路径，范围取 `pyproject [tool.basedpyright]`）；要求 0 error/0 warning。
 - 与 mypy 分工：mypy 是跨平台 CI 门禁（Linux runner）；basedpyright 是本地严格度补充，报错码不同，ignore 注释按各自 code 填写。
+- **`pyright` 与 Pylance 的定位**: `pyright` 只是 basedpyright 的引擎基座，本地增跑结论与 basedpyright 同源，**不是第三条门禁**；Pylance 无命令行入口（仅 IDE 语言服务器），任何「Pylance 已查过」的表述都不得当作门禁证据。本仓**没有** `[tool.pyright]` 配置段，裸跑 `pyright` 走 pyright 自带默认范围（会把 `[tool.basedpyright]` 已排除的 `typings/` 存根一并纳入），与门禁口径不同；需在 IDE 之外复现 pyright 结论时，一律显式传与 `[tool.mypy].files` 同集合的路径，并在回复里写明扫描面与门禁不同。
 - **裁决规则**: CI 只跑 mypy。只在 Linux 或只在 Windows 出现的基于 basedpyright 结论，以与 CI 一致的 Linux 一侧为准；不要为两侧静默而加 `# type: ignore`（会触发 `reportUnnecessaryTypeIgnoreComment`）。
 
 ### isort 收尾清理 `.isorted` 备份残留
@@ -299,7 +300,7 @@ find . -name "*.isorted" -delete
 - `PlatformBreaker`（按 host 熔断，`closed→open→half-open`）: open 经冷却后放唯一探针，成功→closed、失败→重新 open；按 host 隔离。探针带租约（`_PROBE_LEASE_SECONDS=60s`）——探针轮可能以 `continue` 结束且不触发 `record`（主播未开播等待/`disable_record`/线程退出），`_probing` 无租约兜底将永不复位→永久熔断；租约超时后 `allow()` 重新授予探针自愈。回归测试 `test_platform_breaker_probe_lease_regrants_after_timeout`。
 - **接线点仅限固定几处**: `notify.record_error/record_success` 增 `key` 形参委托 `main.scheduler`；`start_record` 入口 `record_host = host_of(record_url)` 且**必须在 `while True` 外层 try 之前预置 `record_host = ""`**（否则 basedpyright 判 possibly unbound）；平台分派前 `scheduler.allow(record_host)` 预检、False 则退避后 `continue`；`check_subprocess` 录制循环受 `recording_semaphore` 管控。
 - 相关配置项「最大同时录制数(0为不限制)」兼作网络并发模式开关；「同一时间访问网络的线程数」在动态模式下为容量下限之一、固定模式下即固定并发值（最小 1）。键名禁止含 `=`/`:`（见「已知坑」configparser 分隔符）。
-- **调度模块测试**: `tests/test_scheduler.py`（16 用例）；改动后 `pytest tests/test_scheduler.py`。全量 pytest 中 `tests/test_twitch_live_collector.py` 会因 safe-delete 护栏失败，属环境限制非调度问题。
+- **调度模块测试**: `tests/test_scheduler.py`（29 用例，2026-09-30 `pytest --collect-only -q` 实测；旧读数 16 已被本批证伪）；改动后 `pytest tests/test_scheduler.py`。全量 pytest 中 `tests/test_twitch_live_collector.py` 会因 safe-delete 护栏失败，属环境限制非调度问题。
 
 ### 录制结果反馈约定（main.py / src/stream_select.py）
 
@@ -308,7 +309,7 @@ find . -name "*.isorted" -delete
 - **录制成功须撤销该地址探针退避（`clear_ffmpeg_reject`，与 `mark` 对称）**: 成功分支解析 `-i` 后实际拉流地址调 `clear_ffmpeg_reject(url, platform)`（只清实际成功的 FLV，HLS 退避不顺带清）；共用同一白名单与退避键。
 - **解析成功轮即上报成功样本**: `port_info["anchor_name"]` 非空须 `record_success(record_host)`，与解析失败分支 `record_error` 对称（此前成功样本仅在 ffmpeg 退出时上报，half-open 探针房间长时间录制期间同 host 其余房间持续熔断饿死）。
 - **直下路径（`direct_download_stream`）补成功样本**: 成功路径末尾 `record_success(record_host)`。
-- 回归测试：`tests/test_record_failure_feedback.py`（5 用例）、`tests/test_stream_select.py::test_mark_ffmpeg_reject_marks_backoff`。
+- 回归测试：`tests/test_record_failure_feedback.py`（8 用例，2026-09-30 实测；旧读数 5 已证伪）、`tests/test_stream_select.py::test_mark_ffmpeg_reject_marks_backoff`。
 
 ### 锁的强制约定
 
@@ -368,7 +369,7 @@ find . -name "*.isorted" -delete
 - **B站弹幕 buvid 必须真实、AUTH_REPLY 必须显式校验**: spi 端点是 `/x/frontend/finger/spi`（少写结尾 `i` 会 200+空 body 永远 JSONDecodeError）；buvid 获取链按真实注册标识优先排序（进程缓存→cookie `buvid3=`→spi→`www.bilibili.com` 首页 Set-Cookie→随机 UUID 兜底标记 is_fallback）。`_decode_packet` 须校验 operation=8 回应的 code：非 0 经 `_reject_auth()` 告警+断开+`spider.invalidate_bili_buvid_cache()`；`_auth_watchdog` 兜底「服务器 8s 不回 AUTH_REPLY 的静默拒绝」。
 - **`collector.stop()` 与采集线程握手顺序不可单独调整**（src/collector.py）: `stop()` 必须先 `set(self._stop_event)` 再读 `self._loop`；`_run()` 必须先发布 `self._loop` 再检查 `self._stop_event`（两相反顺序保证信号必被一方接收）。缺一半会丢信号致 `join(timeout=8)` 超时、线程与 SRT 句柄双泄漏。另：`_shutdown` 中 `await danmaku.stop()` 必须 `asyncio.wait_for` 限时（`_SHUTDOWN_TIMEOUT_SECONDS`），否则 SDK 半开连接挂住 `loop.stop()` 永不执行。
 - **弹幕文本写入 SRT 前必须转义**（src/srt_writer.py::_sanitize_srt_text）: `user_name`/`message` 为外部可控输入，含 `\n` 截断 SRT 块、含 `-->` 被解析成新时间轴行可伪造字幕。替换（非删除）为可见字符。回归锁：注入 `normal\n2\n00:00:99,000 --> 00:00:99,999\nFAKE\n` 后产物必须仍只有 1 个块 1 条时间轴。片内 `end` 须 `max(start, min(end, _seg_seconds))` 钳制。
-- **弹幕链路接线点与分段命名约定**: `start_record` 各平台分支收集 `record_danmaku_args`（局部变量每轮重置为 None）→ 6 处 `check_subprocess(..., platform=platform, danmaku_args=record_danmaku_args)` → `src/__init__.py::get_danmaku_collector(platform, args, base_filename, segment_seconds)`（实现在 `src/collector.py`）。硬约束：① `danmaku_collector.stop()` 必须在 `while process.poll() is None` 循环之外（`DanmakuCollector.stop()` 有 `_stop_called` 防重入幂等）；② 分段文件名——视频 `_%03d`（FLV 已从 `_%02d` 对齐；音频仍 `_%02d`）、SRT `{seg:03d}` 与之对应，`check_subprocess` 需同时剥离两种占位符；③ 抖音弹幕空 cookie 时在 `DouyinDanmaku.start()` 协程内 `await get_ttwid()` 动态获取（不再硬编码 ttwid）。配置项 `弹幕分片时长(秒)` 走 `_safe_float(..., 1800.0)`。
+- **弹幕链路接线点与分段命名约定**: `start_record` 各平台解析分支只填 `ctx.record_danmaku_args`（现 52 处赋值，2026-09-30 grep 实测）→ 单一调用点 `main.py:3595` 的 `check_subprocess(..., platform=platform, danmaku_args=record_danmaku_args)` → `src/__init__.py::get_danmaku_collector(platform, args, base_filename, segment_seconds)`（实现在 `src/collector.py`）。[历史注：原写「6 处 `check_subprocess` 调用」，F-01 把命令构造收敛到四个单一定义点后只剩 1 处] 硬约束：① `danmaku_collector.stop()` 必须在 `while process.poll() is None` 循环之外（`DanmakuCollector.stop()` 有 `_stop_called` 防重入幂等）；② 分段文件名——视频 `_%03d`（FLV 已从 `_%02d` 对齐；音频仍 `_%02d`）、SRT `{seg:03d}` 与之对应，`check_subprocess` 需同时剥离两种占位符；③ 抖音弹幕空 cookie 时在 `DouyinDanmaku.start()` 协程内 `await get_ttwid()` 动态获取（不再硬编码 ttwid）。配置项 `弹幕分片时长(秒)` 走 `_safe_float(..., 1800.0)`。
 - **抖音弹幕 `signature` 保持不编码，禁止顺手加 `quote()`**（F-13）: XBogus 字符表含 `+`/`/`，但上游确认直接拼接不 encodeComponent、服务端不按 form-urlencoded 把 `+` 解成空格。改编码会让本端成为唯一异类指纹。回归锁：`tests/test_douyin_signature_encoding.py`。
 - **B站弹幕 host 轮换的关闭回调必须走 `BilibiliDanmaku._report_close` 闸门**: 仍有候选 host 未尝试时属轮换中间态（转 `_on_reconnect` 留 debug），候选排空或已进入 `_stopped` 终态才向 hub 上报且**恰好一次**；`start()` 进入每个 host 前登记剩余候选数、循环结束必须归零，否则会话期之后的真实断连会被吞（回归锁 `tests/test_bili_host_rotation.py`）。不得为此新增 i18n msgid——`tests/test_i18n_migration.py::test_runtime_templates_covered_by_catalog` 是硬门禁，新增裸 `logger.debug` 文案会当场红。
 
@@ -404,9 +405,11 @@ find . -name "*.isorted" -delete
 
 - **`asyncio.get_event_loop()` 3.14 起不再隐式创建事件循环**: 当前线程无循环时抛 RuntimeError。`src/async_http.py::close_all_clients_sync` 已改为捕获 RuntimeError 走引用清理兜底；协程内获取循环一律 `get_running_loop()`。
 - **跨事件循环禁止创建/调度旧 AsyncClient 的 aclose 协程**（src/async_http.py::_get_client）: 淘汰他循环创建的旧客户端时一律**不创建** `aclose()` 协程，释放引用交 GC 兜底（三个坑：run_coroutine_threadsafe 只调度不等待、加 is_running 门控 await 仍可能永不执行、当前循环直接 await 旧 client.aclose 会操作旧循环 transport）。回归锁：`tests/test_async_http_lock.py::test_cross_loop_running_old_loop_skips_close`/`test_cross_loop_stopped_old_loop_skips_close`。
-- **熔断计数必须增量、不得 `sum(deque)`；`import time` 提顶层**（src/scheduler.py）: `_fail_count`/`_global_error_count` 在样本入队/挤出时增量维护（O(1)），替代 `record()` 内 `sum(self._samples)`（O(40) 持锁遍历）；`_now`/`_allow_sleep` 用的 `time` 已在模块顶层 `import time`。
+- **熔断计数必须增量、不得 `sum(deque)`；`import time` 提顶层**（src/scheduler.py）: `_fail_count`/`_global_error_count` 在样本入队/挤出时增量维护（O(1)），替代 `record()` 内 `sum(self._samples)`（O(40) 持锁遍历）；`_now()`/`_sleep()`（模块级，`_sleep` 在 src/scheduler.py:531）用的 `time` 已在模块顶层 `import time`。[历史注：原写的第二个符号名 `_allow_sleep` 不存在，2026-09-30 grep 实测为 `_sleep`]
 - **「调用方持锁」改「内部自持锁」必须同步清调用点外层锁**: `web_api._purge_expired_tokens()` 改为内部 `with _tokens_lock:` 后，`login` 里原有 `with _tokens_lock: _purge_expired_tokens()` 未移除——`threading.Lock` 非重入，每个登录请求自死锁（征兆：接口不报错、永远不返回）。约定：函数要么只内部加锁、要么只由调用方加锁，二选一并在注释写明；改造其一必须 `grep` 全部调用点。
-- **可重入性判定一律以源码定义行为为准**: 不要把文档清单当推断依据（main.file_update_lock/`_cache_lock` 实为 `RLock`）。改动前必须 `grep` 定义行确认。
+- **可重入性判定一律以源码定义行为为准**: 不要把文档清单当推断依据（main.file_update_lock/`_cache_lock` 实为 `RLock`）。改动前必须 `grep` 定义行确认。历史分类快照（某一时点的实测读数，仅供参照）见 [锁分类快照]。
+
+[锁分类快照]: docs/agent-reference/lock-classification.md
 
 ### ffmpeg 命令构造与容器格式
 
@@ -473,6 +476,7 @@ find . -name "*.isorted" -delete
 - **近期性能优化与修复完整变更记录见 `CODE_WIKI.md`/`CODE_WIKI_EN.md` 更新日志**: 本文件只沉淀可回归硬约定。
 - **`StopRecording.vbs` 必须保存为 UTF-16 LE（带 BOM）**: 由 wscript/cscript 消费，按系统 ANSI 解释 `.vbs`，UTF-8 保存会让中文乱码（源文件统一 UTF-8 约定不适用于该文件）。进程匹配现为三层：① 程序专属 exe 按映像名命中；② python 须命令行含入口脚本或 pip 启动器名 `douyin-recorder`（刻意不按项目目录匹配，避免误杀编辑器工具进程）；③ ffmpeg 须「父进程为已识别录制主进程」或「路径/命令行锚定程序目录」。结束顺序先录制主进程（`taskkill /f /t /pid` 连带子进程树）后残留 ffmpeg——原「先杀 ffmpeg→等 10s→再杀主进程」存在主进程重建 ffmpeg 竞态，且强杀不走 atexit 不执行日志归档（本脚本仅作最后手段）。
 - **包内 ffmpeg 的 PATH 前置在 Apple Silicon 上必须「让位」（W6）**: full 包内置 macOS ffmpeg 是 x86_64 静态构建，已装原生 arm64 用户会被遮蔽强制走 Rosetta。判据收敛到 `src/ffmpeg_install.should_prepend_bundled_ffmpeg_dir()`（唯一事实源，main.py 只保留「重复插入跳过」守卫）。五条判据：`darwin` ∧ `arm64` ∧ 包内目录存在 ∧ 注入前 PATH 快照另有 ffmpeg ∧ 那份 realpath 不在包内目录。三条不可回退：① 探测必须用调用点传进来的 pre-injection PATH 快照（直接读 `os.environ["PATH"]` 会探到自己刚前置的那份）；② 自我遮蔽形态（用户已把包内目录永久写进 PATH）须按 realpath 归一后排除；③ Windows/Linux/Intel Mac 行为逐字不变。`scripts/douyin_live_recorder_standalone.py` 有同名同语义判据（该文件不 import src），改判据必须两处同改、两边注释互相点名，行为等价性由 `tests/test_ffmpeg_path_preference.py::test_twin_agrees_on_every_criterion_combination`（9 格矩阵）锁住。
+- **主线安全/正确性修复必须核对 standalone 孪生副本（2026-09-30 定稿，S-01/S-02 事故沉淀）**: 凡涉及 `sync_http` opener 白名单、`-protocol_whitelist`、ffmpeg 终止链（`ffmpeg_proc`）、`config_bool` 布尔口径、MID-49 类签名/编码修复时，必须同步核对 `scripts/douyin_live_recorder_standalone.py`，并在提交说明写明「已核对 / 已回灌 / 刻意不回灌及原因」——该副本按设计不 import src/，主线修复不会自动生效，单边漂移会在独立发行版上重开已修防线。副本自身的探针/录制链防线（协议白名单 opener、候选内网判定、命令日志脱敏）由 `tests/test_regression_2026_09_22_standalone.py` 独立回归锁护持。
 - **`DouyinLiveRecorder.egg-info` 是构建产物、会长期腐化，改 `pyproject.toml` 后须重建**: `importlib.metadata`/`pip install -e .` 会读它；改 `[project].dependencies`/`version`/`packages`/`package-data` 后跑 `python scripts/sync_metadata.py` 重建（与 `uv lock` 一并，口径见「关键约定」#1；CI 由 `static` job 跑 `--check` 作秒级门禁）。
 - **依赖对账必须先剥 `requirements.txt` 行内注释**: 注释紧贴版本号不带空格（如 `brotli>=1.2.0#b站弹幕解压`），整行比对会全量误报不一致；比对前 `line.split("#", 1)[0].strip()` 再归一化。egg-info 里 `protobuf` 规格被 setuptools 规范化成 `<8,>=6.33.5`（与 pyproject `>=6.33.5,<8` 顺序不同不是差异），应按「包名+规格集合」比对。
 - **排除目录归一化必须先剥 `**/` 再剥 `*/`**: basedpyright 用 `**/downloads`、coverage 用 `*/downloads/*`，若先剥 `*/` 会把 `**/downloads` 切成 `*downloads` 致「basedpyright 缺 7 个目录」假结论。
@@ -489,7 +493,7 @@ find . -name "*.isorted" -delete
 
 - **装饰器与 `def` 之间的注释会让装饰器绑到下一个 `def`**: Python 允许 `@decorator` 与 `def` 间夹注释行，会把兜底套在返回 `str` 的同步辅助函数上而目标平台入口裸奔无兜底。约定：`@decorator` 必须紧贴 `def`，说明注释写在装饰器**上方**。排查 `grep -A3 '^@trace_error' src/spider.py`。
 - **平台解析函数返回契约必须匹配兜底装饰器**: `trace_error_decorator` 失败时回 `{"is_live": False}` 只适用于返回 dict 的函数；返回 str/tuple/None 的必须用 `trace_error_decorator_or_none`（回 None），否则调用方解包抛 ValueError 被自己装饰器二次吞没。调用点须显式判空再解包，新增平台先看返回注解再选装饰器。
-- **`_loads_dict` 与 `_safe_loads` 的分工**: `_loads_dict` 内部复用 `_safe_loads`——平台返回 HTML（WAF/302/Cloudflare/截断 JSON）时回 `{}` 并记 warning，**不再抛 JSONDecodeError**（约 40 处调用任一抛错都会被兜底装饰器吞成「未开播」）。`tests/test_spider.py::TestLoadsDict::test_invalid_json` 断言返回 `{}` 不要改回 `pytest.raises`。
+- **`_loads_dict` 与 `_safe_loads` 的分工**: `_loads_dict` 内部复用 `_safe_loads`——平台返回 HTML（WAF/302/Cloudflare/截断 JSON）时回 `{}` 并记 warning，**不再抛 JSONDecodeError**（103 处调用任一抛错都会被兜底装饰器吞成「未开播」；2026-09-30 实测 `grep -c '_loads_dict(' src/spider.py` = 104 行含 1 处定义，旧读数「约 40 处」已证伪）。`tests/test_spider.py::TestLoadsDict::test_invalid_json` 断言返回 `{}` 不要改回 `pytest.raises`。
 - **spider.py 平台解析一律走 `_loads_dict`+`_dig/_dig_str/_list`，裸 `json.loads` 由棘轮锁住不得回升（MID-48）**: 剩余唯一 1 处是 `get_twitchtv_room_info`（GQL 返回数组）。判据 `tests/test_spider_hardening.py::BARE_JSON_LOADS_CEILING = 1`（只降不升）+ 零裸 loads AST 扫描。配套：① 取不到字段不得静默变空（数值型字段走保留数值的 `_dig`+cast）；② 凭据不入日志（AID/BNO/visitor_st 等只按原值取用，归因日志只带 code/msg）；③ 未开播/已下播每 120s 一轮正常轮次刻意保持静默。
 - **兜底装饰器失败语义影响熔断样本**: 补上装饰器后异常不再穿透到 main.py 通用 except；反之移除装饰器会使该平台瞬时故障计入失败样本、达阈值可能把房间地址自动注释掉。
 

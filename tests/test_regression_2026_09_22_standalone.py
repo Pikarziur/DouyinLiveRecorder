@@ -22,6 +22,7 @@ import importlib.util
 import subprocess
 import sys
 import threading
+import types
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -288,3 +289,153 @@ class TestStandaloneSelftest:
         decoded = out.decode("utf-8", errors="replace")
         for needle in ("非探针线程回报不得关熔断", "陈旧探针回报不得关熔断", "大写 .M3U8"):
             assert needle in decoded, f"selftest 缺少判据 {needle!r}"
+
+
+# ────────────────────────────────────────────────────────────
+# S-01/S-02（2026-09-30，CODE_REVIEW_2026-09-30）：探针/录制链防线与命令日志脱敏
+# ────────────────────────────────────────────────────────────
+
+
+class TestUntrustedStreamTargetGuard:
+    # S-01 ②：平台 API 候选属不可信输入面（恶意/被劫持代理、接口投毒、MITM 都可能改写
+    # 候选）——协议白名单 + 本机/内网/云元数据目标必须在探针与 ffmpeg 之前被拒。
+    # 判据是「守卫给得出拒绝理由」与「候选真的进不了探针」，不是「调用了守卫」。
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///C:/Users/x/secret.mp4",
+            "ftp://cdn.example/a.flv",
+            "data:text/plain,hello",
+            "http://127.0.0.1:6379/x.flv",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://2130706433/x.flv",
+            "http://0x7f000001/x.flv",
+            "http://0177.0.0.1/x.flv",
+            "http://127.1/x.flv",
+            "http://[::ffff:127.0.0.1]/x.flv",
+            "http://100.64.0.1/x.flv",
+            "http://metadata.tencentyun.com/latest/meta-data/",
+            "http://box.local/x.flv",
+        ],
+    )
+    def test_untrusted_targets_get_a_reason(self, url: str) -> None:
+        # 中间五种 IP 形态正是主线 SEV-03 前缀黑名单的绕过载荷（离线即可判定，无 DNS）
+        assert SA._untrusted_stream_target_reason(url) is not None, url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://cdn.example/live/a.flv?wsAuth=x",
+            "https://example.com/a.m3u8",
+            "https://live.douyin.com/746171898479",
+        ],
+    )
+    def test_public_targets_pass(self, url: str) -> None:
+        assert SA._untrusted_stream_target_reason(url) is None, url
+
+    def test_select_source_url_drops_untrusted_without_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 行为锁：全部候选不可信时返回 None，且探针一次都不发（守卫在探针之前）
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("不可信候选不允许到达探针")
+
+        monkeypatch.setattr(SA, "http_probe", _boom)
+        stream = SA.StreamInfo(platform="斗鱼直播", is_live=True, flv_urls=["file:///x/a.flv"])
+        assert SA.select_source_url(stream) is None
+
+    def test_validate_stream_url_hard_rejects_even_last_resort(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 「末位候选仅告警放行」的对象是 CDN 拒绝类误杀，不是本地文件/内网目标——
+        # 不可信目标即便 last_resort=True 也必须硬拒（不吃放行语义）
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("不可信目标不允许探针")
+
+        monkeypatch.setattr(SA, "http_probe", _boom)
+        assert SA.validate_stream_url("file:///x/a.flv", last_resort=True) is False
+
+
+class TestWhitelistOpener:
+    # S-01 ①：build_opener 的默认 Handler 集合不受显式 ProxyHandler 影响——file/ftp/data
+    # 三类协议都会被本地读出 200。行为锁：白名单 opener 对 file:// 给出「白名单外协议」
+    # 的统一失败形态（http_request/http_probe 转成 RuntimeError），响应体一步都不读。
+
+    def test_file_scheme_is_never_read_by_request_and_probe(self) -> None:
+        with pytest.raises(RuntimeError):
+            SA.http_request("file:///C:/Windows/win.ini")
+        with pytest.raises(RuntimeError):
+            SA.http_probe("file:///etc/passwd")
+
+
+class TestFfmpegCommandHardening:
+    # S-01 ③：-protocol_whitelist 与主线 main.py::_build_ffmpeg_input_args 逐字同值，
+    # 两处命令定义点（build_ffmpeg_cmd 规范列表 + run_ffmpeg 内联列表）同位（-i 之前）。
+
+    def test_build_ffmpeg_cmd_carries_whitelist_before_input(self) -> None:
+        cmd = SA.build_ffmpeg_cmd("ffmpeg", "http://x/y.flv", "o.flv", "B站直播", "", 0)
+        wl = cmd.index("-protocol_whitelist")
+        assert cmd[wl + 1] == "rtmp,crypto,http,https,tcp,tls,udp,rtp,httpproxy"
+        assert wl < cmd.index("-i"), "白名单必须位于 -i 之前（输入级选项）"
+
+    def test_both_command_definition_sites_are_in_sync(self) -> None:
+        # run_ffmpeg 的内联列表无法直接调用，按源码断言两处白名单字面量逐字同值——
+        # 与 tests/test_ffmpeg_reconnect_args.py 对同文件两处定义点的结构锁同口径
+        # （正向结构锁：副本两处必须同改，漂移即红）。
+        source = _STANDALONE_PATH.read_text(encoding="utf-8")
+        literal = '"rtmp,crypto,http,https,tcp,tls,udp,rtp,httpproxy"'
+        assert source.count(literal) == 2, f"白名单字面量出现 {source.count(literal)} 处（应为 2 处定义点）"
+
+
+class TestFfmpegCommandLogMasking:
+    # S-02：logs/ffmpeg.log 的命令原文必须脱敏——完整命令含 -headers 里的平台 Cookie 与
+    # -i 的带 token 流地址，该日志 append 无轮转，明文落盘等于凭据长期泄漏。
+
+    def test_mask_helper_replaces_headers_and_input_query(self) -> None:
+        cmd = SA.build_ffmpeg_cmd(
+            "ffmpeg",
+            "http://x/y.flv?wsAuth=SECRETTOKEN&wsTime=1",
+            "o.flv",
+            "斗鱼直播",
+            "DedeUserID=1; sessionid=COOKIESECRET",
+            0,
+        )
+        masked = SA._mask_ffmpeg_cmd_for_log(cmd)
+        assert "SECRETTOKEN" not in masked, "带 token 的流地址未脱敏"
+        assert "COOKIESECRET" not in masked, "平台 Cookie 未脱敏"
+        assert "<headers:" in masked, "headers 占位符缺失（排障形状保留判据）"
+        assert "http://x/y.flv" in masked, "路径须保留以便归因"
+
+    def test_run_ffmpeg_writes_masked_log(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 替身 Popen 走被测模块命名空间 shim（AGENTS：禁改进程级 subprocess 本体）
+        class _FakePopen:
+            def __class_getitem__(cls, item: Any) -> type["_FakePopen"]:
+                return cls
+
+            def __init__(self, args: list[str], **kwargs: Any) -> None:
+                self.args = args
+                self.pid = 4242
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def poll(self) -> int:
+                return 0
+
+        shim = types.SimpleNamespace(**vars(subprocess))
+        shim.Popen = _FakePopen
+        monkeypatch.setattr(SA, "subprocess", shim)
+        log = tmp_path / "ffmpeg.log"
+        rc, err = SA.run_ffmpeg(
+            "ffmpeg",
+            "http://cdn.example/live/a.flv?wsAuth=SECRETTOKEN&wsTime=1",
+            str(tmp_path / "out.flv"),
+            "斗鱼直播",
+            "DedeUserID=1; sessionid=COOKIESECRET",
+            0,
+            "flv",
+            str(log),
+        )
+        assert rc == 0, err
+        text = log.read_text(encoding="utf-8")
+        assert "SECRETTOKEN" not in text, "带 token 的流地址明文落盘"
+        assert "COOKIESECRET" not in text, "平台 Cookie 明文落盘"
+        assert "<headers:" in text, "headers 占位符缺失"
+        assert "http://cdn.example/live/a.flv" in text, "路径须保留以便归因"
