@@ -21,7 +21,11 @@ from src.ttwid import get_ttwid
 # 抖音弹幕对风控极敏感,故 resolve_cookie 按「命令行 > config 抖音cookie > 动态 ttwid」
 # 三级回退;游客态配合随机 user_id 多数房间可订阅,失败多在受限房间,属可接受验证边界。
 URL = sys.argv[1] if len(sys.argv) > 1 else "https://live.douyin.com/699394970561"
-SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else 25
+# 双模式参数守卫（与其余真机脚本同构）：pytest 传进来的 sys.argv[2] 可能是 `-q` 之类的选项，
+# 只判非选项还不够——一次点多个文件时它是下一个测试文件的路径，int(路径) 会当场 ValueError
+# 让本模块收集 ERROR（R7③，2026-09-30 实测）。故再补 isdigit 数值性回落；真机用法不变。
+_SECONDS_RAW = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else ""
+SECONDS = int(_SECONDS_RAW) if _SECONDS_RAW.isdigit() else 25
 
 
 def resolve_cookie() -> str:
@@ -81,7 +85,11 @@ def main() -> None:
     os.makedirs(base_dir, exist_ok=True)
     for f in os.listdir(base_dir):
         if f.startswith("Douyin弹幕验证"):
-            os.remove(os.path.join(base_dir, f))
+            stale = os.path.join(base_dir, f)
+            # R7④（2026-09-30）补 isfile 判定：listdir 里混进子目录时 os.remove 直接抛
+            # IsADirectoryError/PermissionError，真机验证会卡在清理阶段；前缀过滤原本已有、语义不变。
+            if os.path.isfile(stale):
+                os.remove(stale)
 
     base = os.path.join(base_dir, "Douyin弹幕验证_699394970561")
     # segment_seconds=None 不按时间分片:短时验证只需单文件 SRT,开启分片会

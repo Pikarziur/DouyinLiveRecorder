@@ -12,6 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
+from src import web_config
+
+# 与 tests/test_stream_select.py / tests/test_sync_probe_internal_guard.py 同一个公网解析结果
+# （示例 IP，只作 DNS seam 的返回值，不参与任何判定规则）。
+_PUBLIC_DNS_IP = "93.184.216.34"
+
 
 @pytest.fixture(scope="module")
 def main_mod() -> Any:
@@ -98,6 +104,19 @@ class TestFileUpdateLock:
 
 class TestSelectSourceUrl:
     # h265 FLV 无法 copy 录制：启用 HLS 采集且校验通过才切 HLS；关闭时尊重配置.
+
+    @pytest.fixture(autouse=True)
+    def _stub_dns_public(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # WP-J（2026-09-30，方案 1-A）之后，select_source_url 在把地址交给 ffmpeg -i 之前过一次
+        # 「内网/保留目标」落地复核（src/stream_select.py 的 _accept_source），它对**非字面量**主机名
+        # 走 DNS seam web_config._resolve_host_ips。本类用例把 _validate_stream_url 整体 mock 掉、
+        # 地址又是合成域名 cdn.example.com，真解析在无外网/无 DNS 的环境会 NXDOMAIN → 落地复核定罪
+        # 「主机名无法解析」→ 选源返回 None（用例假失败，且把「本机有没有 DNS」当成被测行为）。
+        # 打桩口径沿用 src/async_http.py 的 _internal_stream_target_reason 注释里写明的唯一 seam
+        # （同 tests/test_stream_select.py 的 _stub_dns_public、
+        # tests/test_sync_probe_internal_guard.py 的 _hermetic_probe_env）。
+        # 落地复核自身的行为锁在 tests/test_sync_probe_internal_guard.py::TestSourceUrlHandoff。
+        monkeypatch.setattr(web_config, "_resolve_host_ips", lambda host: [_PUBLIC_DNS_IP])
 
     def test_h265_flv_uses_hls_when_enabled_and_valid(self, main_mod: Any) -> None:
         # 端到端：h265 FLV 校验通过 + HLS 采集开 → 选源切到 m3u8（规避 h265 copy 限制）。

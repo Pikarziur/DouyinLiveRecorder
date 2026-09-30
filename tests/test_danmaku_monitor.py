@@ -7,6 +7,8 @@
 # 3. get_danmaku_collector 工厂透传 room_name / write_srt
 # 4. Web API /api/danmaku 端点返回枢纽快照
 # 5. GUI 弹幕监控（无头）：JSONL 事件分发到线程安全状态、边车文件 tail（含轮转回绕）
+#    （2026-09-29 审查 M-24：tail 用例的停止信号必须发给**传入线程的那只 Event** 并断言线程
+#     已退出；M-31②：gui 改在**用例内**导入，配套 autouse fixture 成对还原 DLR_GUI_PARENT）
 
 import asyncio
 import json
@@ -383,7 +385,7 @@ def test_hub_thread_safety_under_concurrent_feed(tmp_path: Path) -> None:
 
 def test_api_danmaku_endpoint_returns_hub_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # /api/danmaku 返回注入枢纽的快照（认证关闭的本地配置）。
-    from fastapi.testclient import TestClient
+    from starlette.testclient import TestClient
 
     from src import web_api as wa
 
@@ -423,12 +425,37 @@ def test_api_danmaku_endpoint_returns_hub_snapshot(tmp_path: Path, monkeypatch: 
 
 # ─── GUI 弹幕监控（无头，不创建 Tk 窗口） ───────────────────
 
-gui = pytest.importorskip("gui", reason="customtkinter 未安装时跳过 GUI 无头测试")
+
+# M-31②（2026-09-29 审查）：本文件此前在模块级 `gui = pytest.importorskip("gui")`，
+# 于是 **pytest 收集期**就把 DLR_GUI_PARENT=1 注进了整个会话（gui.py 的
+# os.environ["DLR_GUI_PARENT"]="1" 在 import 期执行），与 AGENTS/tests 既有约定
+# 「不在 pytest 进程 import gui」（tests/test_gui_monitor.py 文件头写明同一理由）冲突。
+# 现改为用例内经 _load_gui() 取模块，并由下面的 autouse fixture 成对还原该环境变量。
+# 残余风险（如实记录，不得当作已彻底解决）：
+#   ① sys.modules 里的 gui 不会随用例结束消失，本文件之后的用例再 import gui 仍是命中缓存
+#      （不再重复写 env，因此不会二次污染）；
+#   ② src/logger.py 的「GUI 父进程」判定只在**导入期**读一次该环境变量。本文件的模块级
+#      `from src.collector import DanmakuCollector` 早于任何用例内的 gui 导入，因此
+#      logger 落定的判定仍是「非 GUI 父进程」；但若某个会话让别的文件先 import gui，
+#      仍要靠下游用例各自的 monkeypatch.delenv（test_log_archive.py /
+#      test_logger_gui_parent.py / test_regression_2026_09_22_infra.py）兜住。
+def _load_gui() -> Any:
+    return pytest.importorskip("gui", reason="customtkinter 未安装时跳过 GUI 无头测试")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gui_parent_env_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 进入用例前抹掉标记，退出时由 monkeypatch 恢复进入时的原值 —— 一律用
+    # monkeypatch.setenv/delenv，禁止 patch.dict(os.environ)（harness 注入的 MCP 配置
+    # 整体快照超 32767 上限，写回即抛 ValueError；见 AGENTS「环境变量一律用 monkeypatch」）。
+    import src.logger as logger_mod
+
+    monkeypatch.delenv(logger_mod.GUI_PARENT_ENV, raising=False)
 
 
 # 构造仅含弹幕监控状态字段的 LiveRecorderGUI 桩实例（object.__new__ 跳过 Tk 初始化），
 # 供 _danmaku_dispatch / _danmaku_tail_loop 无头驱动。
-def _make_gui_stub(app_root: Path) -> Any:
+def _make_gui_stub(app_root: Path, gui: Any) -> Any:
     # object.__new__ 跳过 Tk 初始化（无头）：仅挂弹幕监控相关状态字段，供方法无头驱动。
     stub = object.__new__(gui.LiveRecorderGUI)
     stub._danmaku_lock = threading.Lock()
@@ -437,6 +464,10 @@ def _make_gui_stub(app_root: Path) -> Any:
     stub._danmaku_stats_dirty = False
     stub._danmaku_stream_dirty = False
     stub._danmaku_tail_stop = threading.Event()
+    # M-17 的留痕走 self._log（tail 线程只写队列、不触碰 Tk），桩把它收成列表即可断言。
+    stub._log_lines = []
+    stub._log = lambda message, level="info": stub._log_lines.append((message, level))
+    stub._CHAIN_WARN_INTERVAL_SECONDS = 0.0
     stub.app_root = str(app_root)
     return stub
 
@@ -445,8 +476,9 @@ def test_gui_dispatch_maps_events_to_state() -> None:
     # JSONL 事件 → GUI 状态映射：conn 建房/连接、msg 入流、stats 为统计权威来源。
     import tempfile
 
+    gui = _load_gui()
     with tempfile.TemporaryDirectory() as tmp:
-        stub = _make_gui_stub(Path(tmp))
+        stub = _make_gui_stub(Path(tmp), gui)
         # conn 事件建房（started）：房间进入监控表但尚未连接。
         gui.LiveRecorderGUI._danmaku_dispatch(
             stub, {"ev": "conn", "room": "房间A", "platform": "抖音直播", "state": "started", "ts": 1700000000.0}
@@ -486,8 +518,9 @@ def test_gui_dispatch_stopped_removes_room() -> None:
     # 不再显示已失效直播间及其旧弹幕数据
     import tempfile
 
+    gui = _load_gui()
     with tempfile.TemporaryDirectory() as tmp:
-        stub = _make_gui_stub(Path(tmp))
+        stub = _make_gui_stub(Path(tmp), gui)
         gui.LiveRecorderGUI._danmaku_dispatch(
             stub, {"ev": "conn", "room": "房间A", "platform": "虎牙直播", "state": "started", "ts": 1.0}
         )
@@ -499,9 +532,11 @@ def test_gui_dispatch_stopped_removes_room() -> None:
 
 
 def test_gui_tail_reads_jsonl_and_handles_rotation(tmp_path: Any) -> None:
-    # tail 集成：写事件文件 → tail 线程读取入状态；文件变小（轮转回绕）时从头重读不崩溃。
+    # tail 集成：写事件文件 → tail 线程读取入状态；文件变小（轮转回绕）时从头重读不崩溃；
+    # 以及 M-24：对**传入的那只 Event** set 之后，线程必须真的退出。
     import os
 
+    gui = _load_gui()
     logs = tmp_path / "logs"
     logs.mkdir()
     log_file = logs / "danmaku_monitor.jsonl"
@@ -519,11 +554,16 @@ def test_gui_tail_reads_jsonl_and_handles_rotation(tmp_path: Any) -> None:
         ]
     )
 
-    stub = _make_gui_stub(tmp_path)
+    stub = _make_gui_stub(tmp_path, gui)
     # MID-2250 连带修正：_danmaku_tail_loop 的退出标志已改为**逐次创建的局部 Event 形参**
     # （原读共享的 self._danmaku_tail_stop，会被新一轮 clear() 抹掉退出信号 → 线程永不退出），
     # 故这里必须把它作为第二个实参传入，不能再按旧签名只给 stub。
-    t = threading.Thread(target=gui.LiveRecorderGUI._danmaku_tail_loop, args=(stub, threading.Event()), daemon=True)
+    # M-24（2026-09-29 审查，严重假绿）：这只 Event 必须落到**局部变量**并在末尾 set 它。
+    # 此前它是个匿名实参、用例 set 的却是 stub._danmaku_tail_stop（生产签名根本不读它），
+    # join(timeout=3) 于是必然等满、又缺 is_alive 断言 → 「轮转后能停」从未被验证过，
+    # tail 线程完全不响应 stop_event 的回归在这里照样全绿。
+    stop = threading.Event()
+    t = threading.Thread(target=gui.LiveRecorderGUI._danmaku_tail_loop, args=(stub, stop), daemon=True)
     t.start()
 
     # 等待 tail 线程读取 JSONL 并分发：房间A 进入监控表、消息入展示流（带锁读取避免竞态）。
@@ -550,8 +590,11 @@ def test_gui_tail_reads_jsonl_and_handles_rotation(tmp_path: Any) -> None:
         time.sleep(0.05)
 
     # 轮转回绕后被 tail 正确读取到房间B；停止 tail 线程并断言房间B 入表。
-    stub._danmaku_tail_stop.set()
-    t.join(timeout=3)
     with stub._danmaku_lock:
-        assert "房间B" in stub._danmaku_rooms
+        assert "房间B" in stub._danmaku_rooms, "轮转回绕后 tail 未读到房间B"
     assert os.path.exists(log_file)
+
+    # M-24 的本体：set **传入线程的那只** Event，线程必须在预算内自行退出。
+    stop.set()
+    t.join(timeout=3.0)
+    assert not t.is_alive(), "tail 线程未响应传入的 stop_event 退出（守护线程会残留到进程结束）"

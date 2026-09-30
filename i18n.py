@@ -396,11 +396,20 @@ def tr(template: str, **kwargs: Any) -> str:
     # 而 tr() 的调用点大量位于 except 分支内，二次异常会顶掉原始异常，把「网络失败」
     # 升级成崩溃，并把真实故障掩盖掉（zh_CN 常为恒等映射，问题只在切换语言后暴露）。
     # 此处保证 tr() 永不抛：格式化失败时降级为原文模板，并回退用原文模板再格式化一次。
+    # M-19 补充（2026-09-29）：上面的异常清单只覆盖了「占位符名写错 / 花括号未转义」，
+    # 漏掉了**值侧**的两类失败——译文里合法的 `{x.y}` 在 x=None 时抛 AttributeError、
+    # 合法的 `{x:d}` 在 x=None 时抛 TypeError（Python 3.14.7 实测两者均穿透本函数）。
+    # 触发条件完全落在既有风险面内：译者目录是外部可编辑数据，占位符属性/格式符写对
+    # 但调用方某次传进 None（except 分支里 `{e}` 的实参为空对象是常态）即炸，
+    # 二次异常照样顶掉原始异常——与 MI-23 描述的失败模式同一条，只是异常类型不同。
+    # 故两层 except 一并扩入 AttributeError/TypeError，降级语义不变（译文失败退原文、
+    # 原文也退不动就返回裸模板），不额外发日志（tr 在 except 分支里被调，再打日志会
+    # 把真实故障的告警淹成格式化告警）。
     translated = _tr(template)
     try:
         return translated.format(**kwargs)
-    except KeyError, IndexError, ValueError:
+    except KeyError, IndexError, ValueError, AttributeError, TypeError:
         try:
             return template.format(**kwargs)
-        except KeyError, IndexError, ValueError:
+        except KeyError, IndexError, ValueError, AttributeError, TypeError:
             return template

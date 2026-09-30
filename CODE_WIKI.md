@@ -144,7 +144,7 @@
 | Node.js + exejs/PyExecJS | 运行 JavaScript 签名算法（exejs 优先，PyExecJS 回退） |
 | Loguru | 结构化日志 |
 | CustomTkinter + pystray + Pillow | GUI 图形界面与系统托盘 |
-| FastAPI + uvicorn | Web 管理面板后端 |
+| Starlette + uvicorn | Web 管理面板后端 |
 | HTML + CSS + JavaScript | Web 管理面板前端 |
 | Docker | 容器化部署 |
 | gettext (msgfmt) | 国际化翻译编译 |
@@ -231,9 +231,11 @@ DouyinLiveRecorder/
 │   ├── node_install.py                # Node.js 自动安装/初始化
 │   ├── ffmpeg_master_download.py       # FFmpeg master 构建下载器（按平台/架构拉取 + 校验，含挑战页识别与 TOFU）
 │   ├── ttwid.py                        # 抖音访客 ttwid 获取
-│   ├── web_api.py                      # Web 管理面板 FastAPI 应用
-│   ├── web_config.py                   # Web 面板配置读写（不依赖 FastAPI）
+│   ├── web_api.py                      # Web 管理面板 Starlette 应用
+│   ├── web_models.py                   # Web 请求体校验层（纯标准库 dataclass + parse，替代 pydantic）
+│   ├── web_config.py                   # Web 面板配置读写（不依赖 Web 框架）
 │   ├── web_tray.py                     # Web 模式系统托盘（Windows 最小化到托盘）
+│   ├── ui_theme.py                     # GUI 主题层（语义 token + 多主题 + ttk 注册 + 持久化 + 对比度机检）
 │   ├── http_config.py                  # HTTP 客户端共享运行时配置（SSL 验证开关）
 │   ├── async_http.py                   # 异步 HTTP 客户端 (httpx)
 │   ├── sync_http.py                    # 同步 HTTP 客户端
@@ -264,7 +266,8 @@ DouyinLiveRecorder/
 ├── web/                                 # Web 管理面板前端
 │   ├── index.html                      # 单页应用入口
 │   ├── app.js                          # 前端逻辑（API 调用、SSE、渲染）
-│   └── style.css                       # 样式表（主题、响应式）
+│   ├── motion.js                       # 前端动效引擎（零依赖 IIFE：入场/视差/粒子/降级）
+│   └── style.css                       # 样式表（主题、响应式、动效 token）
 ├── i18n/                                # 国际化翻译目录（多语言多格式）
 │   ├── zh_CN/LC_MESSAGES/
 │   │   ├── zh_CN.po                   # 简体中文翻译源（gettext）
@@ -737,8 +740,8 @@ NETEASE_QUALITY_MAP = {"blueray": "OD", "ultra": "UHD", "high": "HD", "standard"
 **架构**:
 
 - `web.py` - 入口：守护线程运行 `main.main()`，主线程运行 uvicorn；支持后台隐藏运行模式
-- `src/web_api.py` - FastAPI 应用：认证（Token）、REST API 路由、SSE 推送、静态资源挂载
-- `src/web_config.py` - 配置读写（不依赖 FastAPI，便于单测）
+- `src/web_api.py` - Starlette 应用：认证（Token）、REST API 路由、SSE 推送、静态资源挂载
+- `src/web_config.py` - 配置读写（不依赖 Web 框架，便于单测）
 - `web/` - 前端静态资源（单页应用）
 
 **后台运行模式** (`web_show_console = false`):
@@ -965,11 +968,9 @@ def host_of(url: str) -> str: ...
 | customtkinter | >=6.0.0 | 现代化 GUI 框架 |
 | pystray | >=0.19.5 | 系统托盘（GUI / Web 托盘模式） |
 | Pillow | >=12.3.0 | 图像处理（托盘图标生成） |
-| fastapi | >=0.140.0 | Web 管理面板后端框架 |
-| starlette | >=1.3.1 | ASGI 工具集（fastapi 传递依赖，`src/web_api.py` 直接导入故显式声明；下限 0.49.1→1.0.1→1.3.1 见 CVE/PYSEC 说明） |
+| starlette | >=1.3.1 | ASGI 框架（`src/web_api.py` 阶段2 由 FastAPI 迁移为直接依赖 Starlette 驱动；下限 0.49.1→1.0.1→1.3.1 见 CVE/PYSEC 说明） |
 | uvicorn[standard] | >=0.51.0 | ASGI 服务器 |
 | python-multipart | >=0.0.32 | 表单/文件上传解析 |
-| pydantic | >=2.13.4 | 请求模型校验 |
 | websockets | >=14.0 | 弹幕 WebSocket 客户端（`src/ws_client.py`；`additional_headers` 为 14.0+ API） |
 | protobuf | >=6.33.5,<8 | 抖音弹幕协议解码（`src/proto/douyin_pb2.py`；上限 <8 为 gencode 兼容护栏） |
 | brotli | >=1.2.0 | B站弹幕解压（protover=3） |
@@ -1622,6 +1623,323 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本直跑时额外输出 `VERIFICATION_RESULT: {"platform":..., "status":..., ...}` 结构化一行供机器解析。
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
+
+### v4.4.0-dev (2026-09-30) — 审查报告三项「待决策」落地（1-A 同步探针内网收口 / 2-A retry 按退出码分档 / 3-A 真机脚本模板门禁）+ 一道防「变异验证未还原」的机检
+
+> 上一批（CODE_REVIEW_2026-09-29_2 修复）收尾时留下三条需用户决策的残余缺口，本轮按批准的 1-A / 2-A / 3-A 组合全部落地。
+> 过程中发现并修复了一起**变异验证残留留在生产代码**的真实事故，并把它变成机器可检（新规则 R8）。
+
+**一、1-A　同步探针的内网收口（`src/stream_select.py`、`src/async_http.py`）**
+
+上一批只给异步侧接了逐跳复检，当时我把它描述成「同步探针同样形态未接线（逐跳层面）」。本轮复核**更正该前提**：
+`src/stream_select.py` 里全仓唯一的内网判定调用点只有 `async_http.get_response_status`，同步探针侧
+**连初始 URL 的内网/回环/云元数据判定都没有**——它只有 `_is_recordable_url` 的协议形态白名单，
+挡得住 `file://`/`concat:`，挡不住 `http://127.0.0.1:6379`。被劫持的平台接口回传一个内网流地址即可命中。
+
+| 项 | 内容 |
+| --- | --- |
+| 单点工厂 | 两处自建 `httpx.Client` 收敛到 `_probe_client()`，客户端自带同步 response 逐跳钩子（`build_sync_hop_guard`）；判定复用 `async_http` 同一份 helper，**不在 stream_select 另写一份** |
+| 导入环 | 钩子工厂经**函数内 import** 取得，沿 `async_http.py:518-521` 记录的同一手法（本模块有模块级 `import main`，加模块级出边会改变初始化顺序） |
+| 初始判定 | `_validate_stream_url` 在发第一个请求之前过 `internal_stream_target_reason`；刻意不复用带 scheme 白名单的那份判定——协议维度已由 `_is_recordable_url` 把关，两道互不替代 |
+| 异常收敛 | `RedirectHopRejected`（继承 `httpx.HTTPError` 而非 `RuntimeError`）在 `_validate_stream_url` 内转成既有「本候选校验失败」的同一个 False，**绝不穿透**给调用方；`_confirm_get_ok` / `_probe_hls_segment` 的「按列表可达处理」兜底一律 `raise` 上抛——否则末位候选会 `return True` 把内网地址交给 `ffmpeg -i` |
+| 未回退 | 探针客户端复用作用域仍是单次选源、不做 `(proxy, verify)` 全局缓存、不关 keepalive、`utils.handle_proxy_addr` 归一位置不动 |
+| 回归锁 | `tests/test_sync_probe_internal_guard.py`（含 AST 结构锁：构造点唯一、`event_hooks` 实参必须来自同步工厂、两处调用点都过初始判定）；异步侧锁 `tests/test_regression_2026_09_29_wp_b_netguard.py` 保持全绿 |
+
+**二、2-A　retry 复合动作支持按退出码分档（`.github/actions/retry/action.yml`、`.github/workflows/ci.yml`）**
+
+| 项 | 内容 |
+| --- | --- |
+| 新增可选入参 | `fail_fast_codes`，`required: false`、`default: ""`；**不传时既有调用点行为逐字不变**（含退避算法、两条文案、最终 `exit 1`） |
+| 命中语义 | 位于退避 `sleep` **之前**，打 `::error:: … 属配置类错误 … 不重试` 并 `exit "$rc"` 保留原码；**不得**退 0 或降级成 warning（假绿） |
+| 解析 | `IFS=", "` + `set -f` + `case ''|*[!0-9]*`，空格/逗号混合可解析、非法项忽略并 `::warning::`、以空格包围串做整码匹配（列表含 `2` 不命中 rc=12）；全程 POSIX 写法不用 bash-only 关联数组 |
+| 接线 | 仅 web smoke 调用点传 `"2"`，闭合 M-32② 的「配置问题不该重试」 |
+| 前提更正 | 工单写「共 10 个调用点」，实测 **16 个**（ci.yml 11 / build-release.yml 5）——此前批次已把更多安装步骤接入该动作；结构锁据实取下限 16（只降不升语义），并断言「正则口径 == YAML 结构口径」防 `uses` 形态漂移让 AGENTS 的 grep 门禁自身失真 |
+| 回归锁 | `tests/test_ci_retry_action.py`：4 条结构锁 + 8 格真 `bash` 行为锁（跑的就是从 `action.yml` 抽出的生产脚本本体，无副本，删生产分支必红）；bash 缺失时**显式失败而非 skip** |
+
+**三、3-A　真机脚本模板门禁 R7（`tests/test_test_hygiene.py` + 5 个 `test_*_live_collector.py`）**
+
+四条 AST 判据逐条点名：① `__main__` 守卫且守卫内真调 `main()`；② 模块级零收集期副作用（只放行 import / 常量赋值 / `sys.path` 注入等既有惯例）；③ argv 数值守卫；④ 清理输出目录必须按平台前缀过滤且先判类型。
+
+实现过程中**抓出一个 AGENTS 明文样例本身是错的**（下列第四项）。反向见证按要求扩展：四条判据各喂最坏形态断言必红、各造合规源码断言不误报，并新增 4 条「在真实脚本上做定向变异、要求只红对应那一条」的用例。
+
+**四、两处对既有文档/前提的证伪与更正**
+
+1. **AGENTS 的 argv 守卫样例被实测证伪**：原写法 `SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else N` 在 `pytest a.py b.py` 一次点多个文件时，`sys.argv[2]` 是**下一个测试文件的路径**——它不带 `-` 前缀，只判非选项会放行，随后 `int(路径)` 抛 ValueError、该模块收集直接 ERROR（实测 4 errors during collection）。5 个脚本统一改为两步式 `_SECONDS_RAW = …` → `int(_SECONDS_RAW) if _SECONDS_RAW.isdigit() else N`，判据由 R7③ 机检，`AGENTS.md` 该条正文按「被证伪条目直接改正文」口径改正。
+2. **审查报告点名的无差别清空确有其事**：`test_bili_live_collector.py` / `test_huya_live_collector.py` 原为 `for f in os.listdir(base_dir): os.remove(...)`（无前缀过滤、不判目录），混入子目录即抛错、并行验证互删；已改为按平台前缀 + `isfile` 判定后删，保留「手跑前从干净目录开始」的原意。
+3. **上一批 AGENTS 里「retry 对 rc 不敏感、rc=2 不能真的立刻停（待决策缺口）」已被 2-A 闭合**，正文同步更正。
+
+**五、事故与新增机检 R8（防「变异验证没还原」）**
+
+一个并行工作包在 `src/stream_select.py` 分片探测分支上做「摘掉 `except RedirectHopRejected: raise`」的变异，跑到轮次上限中断，把 `pass  # MUTATION-M4c …` **原样留在生产代码里**。后果不是少一条注释：`seg_resp` 未赋值 → `UnboundLocalError` 被外层 `except Exception` 当「探测异常」吞掉 → 末位候选 `return True` → **内网地址被交给 `ffmpeg -i`**。该形态对 black / mypy / 注释检查**三面全隐形**（语法合法、类型不报错、注释反而更多），只有用例真跑到那条分支才现形——本次正是新写的同步探针用例把它抓出来的。
+
+据此新增 **R8**：全仓扫描源文件里的 `MUTATION-` 标记，留着即判红；配套三条硬约束写回 `AGENTS.md`「测试编写强制约定」（内存备份 + `finally` 按字节还原 + 必须留标记 + 接手被中断的工作包时第一件事是扫残留而非假设实现已完成）。守卫自身做了三件防自指/防空转的事：标记字面量拆两段拼接（否则守卫判红自己）、断言遍历面 > 200 个文件（否则扫描根写错会静默空转）、反向见证覆盖「带标记必红 / 去掉标记必绿 / 守卫文件自身不含完整字面量」。
+
+**六、验证**
+
+| 项 | 读数 |
+| --- | --- |
+| 1-A 真实出站探针 | 公网 HLS（走播放列表 + **分片探测**那条曾残留变异的分支）`test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` → **True**（不误杀）；`http://127.0.0.1:6379/`、`http://169.254.169.254/latest/meta-data/`、`http://10.0.0.5/live.m3u8`、`http://100.64.0.1/live.m3u8` → 全部 **False**；内网 + `last_resort=True` → **False**（末位不放行）；`file:///etc/passwd` → **False**（形态白名单仍在） |
+| 「公网 → 内网」真实跳转链 | **SKIP(无可用的公开跳转器)**：httpbingo.org 对本机回 403，公网公开且会 302 到内网的端点不存在；由 `httpx.MockTransport` 锁覆盖，不伪造读数 |
+| 2-A | `pytest tests/test_ci_retry_action.py` 单文件 **12 passed / 0 警告**（4 结构锁 + 8 真 bash 行为锁）；端到端接线核对用 ci.yml 真实 `with` 值 + default 按 GitHub 口径填充 → `runs=1 / rc=2 / 0.23s`（`backoff=5` 若真退避应 ≥5s）；三次变异验证实跑：删分支 `4 failed, 8 passed`、`default` 改 `"2"` `1 failed, 11 passed`、分支挪到 `sleep` 之后 `4 failed, 8 passed`，均按字节还原 |
+| 3-A / R8 | `pytest tests/test_test_hygiene.py` **507 passed**；R8 磁盘路径以一次性探针文件实测：放入 `tests/_tmp_r8_probe.py`（含标记）→ `AssertionError: tests/_tmp_r8_probe.py:7` 点名，删除后转绿；探针文件已删 |
+| 真机录制链路 | 抖音 `live.douyin.com/699394970561`（`tests/test_douyin_live_collector.py`，15 秒窗口）→ **SKIP(房间未开播)**；脚本按**既有**的 `status: SKIP` + `reason: room_offline` 结构化一行返回（非本批改动，已用 `git show HEAD:` 核对），不当成失败刷红。本批受影响面是选源校验器而非采集线程，真实出站证据以上方 1-A 那行为准（公网 HLS 走通、四类内网目标全拒）；采集链路健康度以上一批的抖音 PASS(59 条/4518 字节)、B站 PASS(9 条/678 字节) 为基线 |
+| 全量门禁 | `python scripts/run_gates.py` 8 条全绿 + 内嵌 pytest warnings summary 为空（读数见交付回复） |
+
+**七、仍未闭合**
+
+- GitHub Actions 侧的 `inputs → env` 展开由 runner 完成，本机只验证了「按 GitHub 口径填 default 后脚本行为正确」；合并后建议看一眼首个 web smoke 失败件日志是否出现 `退出码 2 属配置类错误 … 不重试`。
+- `build-release.yml` 的 5 个调用点刻意不传 `fail_fast_codes`（都是 choco/apt/brew/pip 安装，不存在「配置类错误」这一档退出码，传值只会削弱网络抖动重试），已由结构锁显式钉住「无人传」而非放任漂移。
+- 逐跳钩子的触发时机仍在响应已收到之后（闭合「不再跟随 + 不外流」，不是「不建连」）；要建连前拦断需改 request 钩子（每跳两次判定/两次 `getaddrinfo`），DNS 重绑定窗口本层不闭合——两者都作为残余风险写在源码注释与本条。
+- 上一批的目视项与真机缺口不变（M-14/M-16/M-18/M-22 观感验证、TikTok 需可出境网络复跑 M-11、斗鱼当时均无活房间、`basedpyright` 本机未安装）。
+
+### v4.4.0-dev (2026-09-29) — 全量审查报告 CODE_REVIEW_2026-09-29_2 修复批次（P0+P1+P2 共 31 个编号）
+
+> 依据 `docs/worklog/CODE_REVIEW_2026-09-29_2.md`，按用户批准范围 P0+P1+P2 落地（31 个编号 / 33 个独立问题）。
+> 同批未纳入：轻微项 43-47（前端 a11y）、P3 的 M-6（VBS 匹配面收紧）/ M-7（migu wasm SRI）/ M-20（冻结环境 i18n 实测），
+> 及各标「待核实」条目。所有修复均附回归锁，安全不变量类另做变异验证。
+
+**一、安全收口（S-1、M-1 ~ M-5）**
+
+| 编号 | 落点 | 内容 |
+| --- | --- | --- |
+| S-1 | `src/spider.py:140-174`、`112-121`、`6183-6254` | Shopee 短链落地页补齐与小红书 SEV-2214 **同型**的双闸：域族后缀白名单（`urlparse().hostname` 精确/`.` 后缀 + 拒 userinfo）+ `web_config._host_internal_reason` 内网判定；不可信即丢弃跳转、保留原始 url 并剥 Cookie；`api_host` 构造后再过一次白名单（投毒 `host_suffix` 也拦得住）；`_shopee_host_suffix` 由裸字符串切分改判 hostname |
+| M-1 | `src/async_http.py:87`、`460`、`532-588`、`679` | 探针与 `async_req` 全部分支的**逐跳**重定向复检：在 `_build_client` 单点挂 `event_hooks` 响应钩子，每一跳落地 URL 复用 `_internal_stream_target_reason`，命中即停止跟随并按既有「不可达」语义返回；DNS 重绑定窗口登记为残余风险（判定结果刻意不加缓存） |
+| M-2 | `src/sync_http.py:56-140`、`309`、`375` | `sync_req` 补 scheme 白名单（复用 `utils.is_safe_http_url`，不自写第二份判定），opener 改显式白名单构造、不再注册 FileHandler/FTPHandler/DataHandler；abroad 分支用进程全局 urlopen，故另加落地复核 |
+| M-3 | `src/spider.py:716-720`、`911`、`1126`、`1289`、`1848`、`3324`、`3490`、`4279`、`4512`、`5137` 等 | 进 raise/日志的原始 URL 一律先过 `utils.mask_credentials`（PandaTV/WinkTV 私有房 `pwd` 明文落轮转日志为主因，抖音/TwitCasting/微博同口径收口） |
+| M-4 | `src/spider.py:3908-3920` | `login_popkontv`（全文件唯一绕过 `async_req` 的生产 httpx 请求）异常文本过脱敏并补 `type_name`，防代理 `user:pass@` 外泄 |
+| M-5 | `src/notify.py:92-98`、`113-155`、`173-187`、`203-205` | 录后自定义脚本四条失败分支的命令原文一律脱敏；超时后第二次 `communicate()` 加有限超时；进程树回收 POSIX 走 `start_new_session` + `killpg`、Windows 走 `taskkill /T /F`（argv 列表，禁 shell=True），失败一律退化到原 `kill` |
+
+**二、录制与解析正确性（M-8 ~ M-13）**
+
+| 编号 | 落点 | 内容 |
+| --- | --- | --- |
+| M-8 | `src/spider.py:207-324` | 快手 did / B站 buvid 的模块全局快路补 proxy 一致性判定，跨代理出口不再串用设备指纹（镜像 ttwid MIN-2220 的已修形态），锁类型与跨 await 语义未动 |
+| M-9 | `src/spider.py:723`、`914`、`1173`、`1370`、`1610`、`3200` | `anchor_name` 可为 `None` 的漏网点统一到 `_dig_str` / `isinstance(v, str)`，根除 `clean_name(None)` 崩掉整轮解析 |
+| M-10 | `src/spider.py:4325-4331` | TwitCasting 受限房登录回退由只接 `AttributeError` 扩为同时接住 `ValueError`（PEP 758 无括号），原「解析失败→登录重试」死分支复活 |
+| M-11 | `src/stream.py:654-691` | TikTok 选档不再把 FLV 钳过的下标写回共享变量：保留原始请求索引，FLV/HLS 各按自身长度钳制（与本文件抖音分支同口径），回退基准同批修正；HLS-only 房间「选流畅实拉原画」且无降级提示的形态闭合 |
+| M-12 | `main.py:4950-4959` | 弹幕平台列表改列表推导 `strip()` + 去空项，与同函数 HLS 排除列表同口径；`"斗鱼直播, B站直播"` 不再恒不命中 |
+| M-13 | `src/platforms/bilibili.py:55-159` | B站 host 轮换加 `_report_close` 闸门：仍有候选未尝试属中间态（转 `_on_reconnect` 留痕），排空或 `_stopped` 终态才上报且恰好一次；轮换结束把 `_hosts_left` 归零，否则会话期真实断连被吞。未下沉 WsClient、未合并 `backup_url` 主备轮换、`src/ws_client.py` 零改动 |
+
+**三、Web / i18n / 前端（M-18、M-19、M-21 ~ M-23、M-26）**
+
+| 编号 | 落点 | 内容 |
+| --- | --- | --- |
+| M-18 | `web.py:199-239`、`258-262` | 「未启用认证不允许监听非回环」安全闸门整体上移到 `_enter_background_mode` **之前**，拒绝文案不再被 stdio 重定向吞掉；被证伪的「拒绝即零副作用退出」注释按 AGENTS 例外条款改正并压为一行历史注 |
+| M-19 | `i18n.py:399-414` | `tr()` 两层 except 扩为含 `AttributeError, TypeError`（实测 `{x.y}`+None 抛 AttributeError、`{x:d}`+None 抛 TypeError），兑现「永不抛」承诺；`translated_print` 复核无同类缺口（全程不做 `.format`） |
+| M-21 | `web/app.js:753-870` | 三条轮询链（SSE / 日志 / 弹幕）的续期统一经 `makePollChain()` 代次令牌：`halt()` 与 `begin()` 都推进代次，在途回调落地时代次不符即丢弃且不重排，失联定时器链不再产生 |
+| M-22 | `web/app.js:1498-1560`、`web/index.html:176-190`、`web/style.css` | 认证复验口令由 `window.prompt` 明文采集改为 `type="password"` 弹窗，四个出口一律经 `_settleReauth()` 立即清空输入节点；`reauth_password` 只在认证两键的 PUT 上携带，不再污染同批其余键的请求体 |
+| M-23 | `web/app.js:1107-1117` | 弹幕折叠计数 `m.dropped` 补过 `esc()`，恢复本文件「拼接路径一律转义」不变量 |
+| M-26 | `tests/frontend/test_regression_2026_09_22_gates.mjs` | 删除两条钉旧源码字面量的 `doesNotMatch` 文本锁（后端已实现强制复验、字面量已漂移，断言空洞成立且与 Python 侧新契约互相矛盾），改为锁「前端认证两键路径确实采集并下发 `reauth_password`」的正向行为锁；用例数 32 → 36 |
+
+**四、GUI 健壮性（M-14 ~ M-17、M-24、M-31）**
+
+| 编号 | 落点 | 内容 |
+| --- | --- | --- |
+| M-14 | `gui.py:1110-1360`、`3627`、`3684` | 画质监控的匹配串改由**与生产侧同 msgid 的 `i18n.tr()` 结果**派生（转义后组装）并按语言惰性重算，硬编码简中常量清除；`src/recorder_status.py` 那条**未过 tr 的裸字面量**继续按原文匹配并在注释写明原因。**刻意未引入** `#DLRQ` 结构化协议（AGENTS 关键约定 #13 列为待批准长期方案）。收尾自查另修一处本批自己引入的缺陷：按语言缓存改为「组装后复验语言码未变才落键」——组装要连读 6 次 `tr()` 而录制线程与 UI 线程可并发切语言，无条件写入会把**混语** patterns 固化（回归锁 `test_mid_build_language_switch_is_not_cached`） |
+| M-15 | `gui.py:1466`、`3519`、`3667`、`3132` 一带 + `gui.py:1599-1612` | `after` 自续期链的续期注册移入 `try/finally` 无条件重排；`ts` 等外部字段走统一数值容错 helper（`null` 记录不再打断定时链）。收尾补齐**第 4 支同型链** `_pump_ui_events`（UI 事件泵）：它把续期写在函数最后一句，而前面的「按需激活日志刷新链」会在窗口销毁竞态中抛错——断了即 `post_ui` 排队的收尾回调永不执行（关不掉窗口）；结构锁 `_CHAINS` 已扩到四链逐条点名 |
+| M-16 | `gui.py:3226-3352`、`4175-4189` | 新增单飞入口 `_stop_child_once`：「停止录制」与「彻底退出」共用，退出复用在途停止线程而非并行第二遍控制台附着（控制台附着是进程全局状态）；在途登记与注销都落在无条件路径上 |
+| M-17 | `gui.py:3801-3844` | tail 线程 try/except 下沉到**每条事件**（坏条 continue），同批完好事件不再被一条脏数据连带丢弃；最外层异常有限频 warning 留痕 |
+| M-24 | `tests/test_danmaku_monitor.py:562-599` | tail 用例改为对**实际传入的那个 Event** set，并补 `assert not t.is_alive()`——「轮转后能停」第一次被真正验证（此前守护线程静默残留至进程退出） |
+| M-31 | `tests/test_gui_monitor.py:79-85`、`tests/test_danmaku_monitor.py:429` | 子进程显式注入 `PYTHONUTF8`/`PYTHONIOENCODING`；`import gui` 从收集期移入用例内并配 autouse fixture 成对还原 `DLR_GUI_PARENT`（禁 `patch.dict(os.environ)`） |
+
+**五、测试体系与维护脚本（S-2、M-25、M-27 ~ M-30、M-32）**
+
+| 编号 | 落点 | 内容 |
+| --- | --- | --- |
+| S-2 | `tests/test_twitch_live_collector.py:42`、`109`，结构锁 `118-190` | 执行体整体移入 `def main()` + `if __name__ == "__main__": main()`，与其余 4 个兄弟真机脚本同构。取证：`pytest --collect-only` 由 **20.55 秒 / no tests collected / 退出码 5** 变为 **0.81 秒 / 1 test collected**，收集期真机连接、`sleep 20`、清空 `tests/_out_live`、`sys.exit(1)` 中断会话全部消失 |
+| M-25 | `tests/test_huya_danmaku.py:121` | 裸赋值 `spider.async_req = fake` 改 `monkeypatch.setattr`（原形态不还原、假签名残缺，污染整个 pytest 会话） |
+| M-27 | `tests/test_config_io_backup.py:20-26`、`tests/test_log_archive.py:114`、`tests/test_anchor_rename.py:15-20` | 进程全局 `os.remove`/`os.rename` 的 patch 一律改走被测模块命名空间的 `SimpleNamespace(**vars(os))` shim（窗口内不再波及 loguru 与其他后台线程） |
+| M-28 | `tests/frontend/test_motion.py`（新）、`.github/workflows/ci.yml` | `test_motion.mjs` 5 条用例补 Python 包装并入 CI「Gate frontend tests not skipped」的 node-id 清单（`node --test <文件>` 只跑被点名文件、不会顺带发现同级其他 .mjs，此前这些降级/清理锁在正常 CI 中从不执行）；本批另把 WP-G 新增的 `tests/frontend/test_auth_reauth.py::test_auth_reauth` 一并登记进同一清单 |
+| M-29 | `tests/test_machine_validation_fixes.py` | 心跳超时用例改为记录每次 `close()` 的**时刻与来源**并逐入口归因，断言第一次 close 发生在超时点且早于主动停止（原 `len(close_called) >= 1` 对「删掉超时分支」全盲）；同文件「三处调用都超时」的聚合计数同批收紧为逐入口 |
+| M-30 | `tests/test_notify.py:27`、`63`、`74` | 子进程命令由字面量 `python` 改 `sys.executable`（只提供 `python3` 的 Linux/CI 镜像必失败、本机 Windows 恒绿的形态消除） |
+| M-32 | `scripts/sync_metadata.py:112-158`、`scripts/smoke_test.py:87-192`、`214-218` | ① `shutil.which` 早退 + 捕 `OSError`，uv 缺失时 WARN 分支可达且后续 egg-info 重建照做（`--check` 只读路径零子进程，由 tripwire 用例钉住）；② `load_config` 成为唯一校验点，headers/checks 形态畸形一律走 rc=2（原 `.items()` 抛 AttributeError → rc=1，破坏 `_ci_web_smoke.sh` 区分「面板故障可重试 / 配置问题」的契约） |
+
+**六、i18n 目录同步（S-1/M-4 新增文案）**
+
+- 新增 4 条 msgid（Shopee 双闸 3 条 + popkontv 异常带 `type_name` 1 条）已落 `zh_CN.po` / `en_US.json` / `en_GB.json` / `zh_TW.yaml` 四目录并重编 `.mo`；
+  并行防撞中间态 `_i18n_pending_wpa.json` 按 AGENTS 关键约定 #14 在中央合并后已删除。
+- 条目数两种口径（2026-09-29 本机实读，不推算）：JSON 键数 **791**；`.mo` 头部 N **792**（含头部空 msgid，故 N = 键数 + 1）。取数命令：
+  `python -c "import struct;print(struct.unpack('<6I', open('i18n/zh_CN/LC_MESSAGES/zh_CN.mo','rb').read(24))[2])"`；
+  `python scripts/compile_po.py --check` 自报同为 792（.po/.mo 同步）；`python scripts/extract_i18n_strings.py` 报「缺失 0 条」。
+
+**七、验证（真机，按 AGENTS 完成定义第 2 步）**
+
+| 日期 | 平台 | 房间地址（脱敏） | 脚本 | 结果 | 可核对读数 |
+| --- | --- | --- | --- | --- | --- |
+| 2026-09-29 | 抖音 | live.douyin.com/699394970561 | `tests/test_douyin_live_collector.py` | PASS | 59 条 / SRT 4518 字节 |
+| 2026-09-29 | B站直播 | live.bilibili.com/21452505 | `tests/test_bili_live_collector.py` | PASS | 9 条 / SRT 678 字节，`_report_close` 闸门下无「假关闭」 |
+| 2026-09-29 | 虎牙直播 | www.huya.com/660000 | `tests/test_huya_live_collector.py` | WARN | 0 条，连接正常、该时段无弹幕（SRT 已生成） |
+| 2026-09-29 | Twitch | twitch.tv/forsen | `tests/test_twitch_live_collector.py` | WARN | 0 条；守卫后独立直跑仍可用（S-2 活证） |
+| 2026-09-29 | Shopee | shp.ee/****（无效短链） | 进程内探针 `spider.get_shopee_stream_url` | 拦截活证 | 落地页拼出的 `api_host=https://live.shopee.ee` 被域族白名单闸拦下并落 warning，按未开播返回——S-1 的真实出站证据 |
+| 2026-09-29 | 斗鱼直播 | www.douyu.com/1、/23059、/9235411 | `tests/test_douyu_live_collector.py` | SKIP(房间未开播) | 主播名仍正确解析出（「斗鱼官方视频号」「注意前方猪妖」），解析链未坏；请用户有活房间时复跑 |
+| 2026-09-29 | TikTok | www.tiktok.com/@tiktok | 进程内探针 | SKIP(无出境网络) | `ConnectTimeout` + 内置游客 cookie 过期告警；M-11 需用户在可出境网络下用真实房间、画质设「流畅」复跑，核对 `logs/PlayURL.log` 选中的 m3u8 非首档 |
+
+**八、残余缺口与交回用户的动作**
+
+- **GUI 目视项**：M-14/M-15/M-16/M-17 的无头验证不能替代观感——需用户切英文后重启录制，确认画质监控页仍有录制中行/降级告警/空态清除；M-22 需确认口令窗掩码显示、取消后输入节点已清空。
+- **M-18**：拒绝文案现落在未被重定向的 stdout/stderr + 一条 warning，但桌面双击 `python web.py` 时控制台仍随 `sys.exit(1)` 销毁；要彻底不「一闪」需产品决策（拒绝前暂停或写横幅）。
+- **逐跳复检（M-1）的三条边界**：`src/stream_select.py` 的同步探针自用 `httpx.Client`、不经 `_build_client`，同形态仍未接线；response 钩子在该跳响应已收到后才触发（闭合的是「不外流 + 不再跟随」，不是「不建连」）；DNS 重绑定窗口本层不可消除。
+- **retry 动作对 rc 不敏感**：`.github/actions/retry` 对任何非 0 退出码一视同仁重试，故 M-32② 修正的「rc=2 配置问题立刻停」目前只在步日志可见，job 结论层面 1 与 2 仍不可分——需决策是否给 retry 加退出码分档入参。
+- **建议的新门禁未实现**：真机脚本模板与 lint 检查（必须有 `__main__` 守卫 + 平台前缀清理）作为建议项留存，未擅自新增门禁。
+- **P3 / 待核实项未动**：M-6、M-7、M-20，以及各标「待核实」的轻微项。
+
+### v4.4.0-dev (2026-09-29) — GUI 卡死修复：自适应 wraplength 改「真防抖 + 迟滞」，根除 DPI 重缩放期的事件风暴互振
+
+> 用户实测：文字高频闪烁 → 部分界面元素渲染不完整 → 整个界面卡死无响应。根因是**前一修复（自适应
+> wraplength）在 `<Configure>` 里同步追写**，与 CTk 的 DPI 重缩放机制互振。触发路径 = 用户把窗口拖到
+> 不同缩放率的显示器（或系统 DPI 调整）——与开发期压力探针挂死是同一机制的两个入口。
+
+**一、根因链（全部实证）**
+
+1. CTk 的 DPI 变化处理走 `ScalingTracker.update_scaling_callbacks_* → 控件 _set_scaling → _draw → _update_dimensions_event → update_idletasks` 的**递归互泵**（ctk_scrollbar.py 深处可见互相嵌套帧）。
+2. 重缩放期间内部标签宽度剧烈瞬时摆动（探针实测 350↔1566 设备像素，同一宽度下 wraplength 被追逐成 `334→1038→190→858→…`）。
+3. 旧绑定在每个 Configure 里同步 `label.configure(wraplength=…)`——每次写入使几何再失效、排进同一 idle 队列，队列永不排空：**`update()`/mainloop 永不返回 = 卡死**；高频重排 = 文字闪烁；绘制饥饿 = 元素渲染不完整。
+4. 判定性对照：同一 10 次 DPI 翻转压力（走 `set_widget_scaling`，与 `check_dpi_scaling` 同一回调链）——绑定生效版 120s 泵不完（超时被杀 = 卡死复现）；绑定 no-op 化对照组 **9.2s 正常跑完**。
+
+**二、修复（gui.py）**
+
+| 项 | 内容 |
+| --- | --- |
+| 真防抖 | `<Configure>` 只重置计时器（`after_cancel` + `after(120ms)`），风暴不安静就**一次都不写**——结构性杜绝把几何失效喂回递归；刻意不用「每 120ms 节流一次」（风暴中途的写入仍可能经滚动条阈值互振重新点燃递归） |
+| 迟滞 | `_wrap_should_apply(current, new, scale_changed)` 纯函数：`|new−current| ≤ max(12, 2%)` 且缩放率未变 → 不写。滚动条出现/消失的 ±~11 逻辑像素抖动被吸收；首次应用（current==0）与缩放率变化（换算基准变了）强制写 |
+| 竞态守护 | `_run` 全程 TclError 守卫——弹幕/画质占位每 2s 重建，防抖回调可能与销毁竞态 |
+| 启动成形 | 绑定时若已有实宽（winfo_width>1）同步先应用一次，首帧即折行；后续变更走防抖 |
+
+**三、验证**
+
+- 压力回归锁（`tests/test_gui_wrap_hints.py::TestRealWindowWrap::test_dpi_flip_stress_*`，真窗、无显示 skip）：完整构建 GUI + 8 次 DPI 翻转，必须排空事件循环（修复前等价场景直接超时）且每标签 wraplength 写入 ≤24（实测 ~1 次/翻转）。
+- 端到端真窗终验（1120×740，150% 系统缩放）：四条长提示全部无裁切；模拟 DPI 1.2↔1.0 翻转后全部收敛到正确折行、零卡死。
+- 迟滞纯函数 5 用例（无头）+ 防抖/守卫 AST 源码锁；`run_gates.py` 8/8、pytest 3308 passed/0 警告、basedpyright 0/0/0。
+
+**四、已知微边界**
+
+- 启动后 ~120ms 内长提示可能先以未折行形态渲染一帧（防抖首笔结算前），随后成形——不可感知级折衷，换风暴期零写入的结构性安全。
+
+### v4.4.0-dev (2026-09-29) — GUI 文字截断修复：长提示自适应折行（`_bind_adaptive_wraplength`），根除 pack 两侧对称裁切
+
+> 用户截图实测（150% DPI，默认 1120×740 窗口）：控制台「启动后将调用 main.py…」提示两侧各缺半个字、
+> 弹幕占位提示右缘裁切。根因是同族的：**长文案标签请求宽超过父容器分配宽时，Tk pack 按默认
+> anchor=center 两侧对称裁切**；画质页说明的定宽 `wraplength=1000` 在窄窗口下是同一失效的变体
+> （右缘裁切）。全库排查共 5 处同形态，一并修复。
+
+**一、改动按模块分类**
+
+| 模块 | 变更性质 | 主要文件 | 关键改动 / 判据 |
+| --- | --- | --- | --- |
+| 自适应折行 | 新增 | `gui.py` | `_compute_wraplength(width_device_px, scale, margin)` 纯函数（设备像素→逻辑值：CTk 对 wraplength 做 DPI 缩放（`ctk_label.py` configure 时乘 `_widget_scaling`），`<Configure>` 事件给的是设备像素，须除以 `ScalingTracker.get_widget_scaling` 折回；下限 120 防止 wraplength→0 退回不折行）；`_bind_adaptive_wraplength(label)` 绑标签**自身**窗口宽（前提 `pack(fill=tk.X)`：窗口宽由 packer 分配、与标签自请求解耦，无「wraplength→请求宽→窗口宽」回环；绑定时先按当前宽设初值——重 pack 而几何不变时 Configure 不触发）；`ScalingTracker` 从 `customtkinter.windows.widgets.scaling.scaling_tracker` 显式导入（顶层命名空间不导出，类型检查报 reportAttributeAccessIssue） |
+| 接线点 | 修改 | `gui.py` | 控制台提示改 `pack(fill=tk.X, expand=True)` + 绑定；画质说明去定宽 `wraplength=1000` 改绑定；画质/弹幕两个占位提示收敛到 `_make_quality_placeholder` / `_make_danmaku_placeholder` 工厂（参数 `tk.Misc`——CTk 6.0 的 CTkScrollableFrame 不是 CTkFrame 子类），初始构建与每轮刷新重建共用，文案从 4 份重复收敛为各 1 份 |
+| 测试 | 新增 | `tests/test_gui_wrap_hints.py` | 三层锁：纯函数子进程单测（换算锚点 1584@1.5→1050 固化、120 下限、零/负缩放、单调性）；AST 源码锁（绑定助手定义一次且恰 4 接线点、占位文案各只出现一次、全库无定宽 wraplength kwargs、工厂必须 fill=tk.X+绑定、构建与刷新两路径都必须走工厂）；真窗用例（fill=X 标签窄容器自动折行不裁切、加宽后 wraplength 增长；无显示环境 skip——唯一 skip 面） |
+
+**二、根因与设计要点**
+
+1. **为什么两侧对称缺字**：pack 的默认 anchor=center 把放不下的子件在分配到的窄 parcel 里居中，超出部分两侧等量被父容器剪掉——左缘「启」缺半、右缘「制」缺半，是「请求宽 > 分配宽」的指纹性症状。
+2. **为什么绑标签自身窗口宽是安全的**：`fill=tk.X` 下窗口宽完全由 packer 分配，改 wraplength 只改请求高度不改窗口宽，机制上不存在振荡；绑父容器宽则要另行扣除兄弟控件（按钮行）宽度，更脆。
+3. **真窗用例刻意不调 `set_widget_scaling`**：手动缩放覆盖与 CTk 的系统 DPI 追踪在真窗映射时互相触发全量重缩放（实测事件风暴 → `update()` 永不返回）；系统自身 DPI 已让缩放折算被真实验证，换算公式由纯函数锚点锁钉死。
+4. **CTk 6.0.0 两处事实**（源码核实）：`configure(wraplength=...)` 内部乘 `_widget_scaling`，`cget("wraplength")` 返回逻辑值；`CTkScrollableFrame` 的 MRO 不含 `CTkFrame`（两者仅共享 `CTkBaseClass` 祖先）。
+
+**三、验证**
+
+- 端到端实测（本机 Windows，150% 系统缩放，子进程构建完整 `LiveRecorderGUI`，与截图同尺寸 1120×740）：修复前控制台提示 reqwidth 768 > 实宽 ~520（两侧裁切）、弹幕占位 1564 > 1538；修复后四条长提示（控制台提示 / 弹幕占位 / 画质占位 / 画质说明）全部「请求宽 ≤ 实际宽、wraplength 生效」（540≥519、1196≥1092、1196≥540、1230≥986），控制台提示折为两行。
+- `run_gates.py` 8/8 全绿；全量 pytest 3300 passed / 14 skipped / 0 警告；覆盖率 44 模块全达标；basedpyright 0 errors / 0 warnings / 0 notes；真窗用例连续三轮 8s 稳定通过。
+- 回归锁：`tests/test_gui_wrap_hints.py`（10 用例）；变异验证——去掉任一工厂的 `_bind_adaptive_wraplength` 调用或把 fill=tk.X 删掉，AST 锁立即转红。
+
+### v4.4.0-dev (2026-09-29) — GUI 主题层（阶段3）：语义 token 三主题 + 运行时切换 + `[GUI] gui_theme` 持久化 + WCAG 对比度机检
+
+> 本节是本次改动的模块级总览。阶段3（UI 现代化 · GUI 主题层）新增 `src/ui_theme.py`（零显示依赖、可无头 import），
+> `gui.py` 侧边栏新增「界面主题」菜单（浅色 / 深色 / 高对比度），选择即写回 `config.ini [GUI] gui_theme`
+> 并注册为 ttk 主题（`dlr-<id>`，基底 clam）；`Colors` / `Fonts` 门面与全部既有符号签名不变。
+
+**一、改动按模块分类（含新增 / 修改 + 文件路径）**
+
+| 模块 | 变更性质 | 主要文件 | 关键改动 / 判据 |
+| --- | --- | --- | --- |
+| 主题引擎 | 新增 | `src/ui_theme.py` | 13 个语义槽位（提案 §5.2 十二槽 + `on_primary`：深色/高对比主题主按钮为亮蓝填充、标签需近黑前景，`surface` 兼作按钮前景在深色下不成立）；`THEMES` 三套（light / dark / high_contrast）；`contrast_ratio` WCAG 相对亮度；`CONTRAST_REQUIREMENTS` 对比度契约（正文 4.5 / 非文本与禁用 3.0）；`ThemeManager`（select/apply 幂等，`theme_create` 重复注册守卫）；`load/save_theme_preference` 走 `update_or_append_config_line`（缺节/缺键补建 + 注释保留 + 原子写），刻意不经 `config_io.read_config_value`（其写回持 `main.file_update_lock`，GUI 不进录制引擎锁体系） |
+| GUI 接线 | 修改 | `gui.py` | 导入 `src.ui_theme`；`__init__` 读 `[GUI] gui_theme`——有显式偏好则按主题归属同步 CTk 外观模式，无偏好跟随系统外观（保持升级前行为）；侧边栏「界面主题」`CTkOptionMenu`（显示名经 i18n）+ `_on_theme_change`（select → apply → 持久化 → 外观模式映射 → 外观菜单显示同步 → `_sync_canvas_bg`）；`_THEME_CTK_MODE` / `_THEME_LABELS` 模块常量；`Colors`/`Fonts`/`LiveRecorderGUI`/`SystemTray`/`AdvancedSettingsWindow`/`_quality_alert_expired` 符号与签名逐字不变 |
+| 模板与文档 | 修改 | `config/config.ini`、`README.md` | 模板新增 `[GUI] gui_theme =`（空 = 跟随外观）；README 配置块补 GUI 节说明 |
+| i18n | 同步 | `zh_CN.po`(+`.mo`)、`en_US.json`、`en_GB.json`、`zh_TW.yaml` | 新增 7 条：界面主题 / 浅色 / 深色 / 高对比度 / 两条切换成功与写回失败文案（含 `{theme}`/`{type_name}`/`{err}` 占位符）。四目录键集一致（i18n 测试锁全绿）；`web/app.js` 无需同步——主题菜单为 GUI 独有文案，无 Web 面 |
+| 测试 | 新增 | `tests/test_ui_theme.py` | 34 用例：对比度数学锚点（黑白 21:1、白压 #4F6DF5 4.34 固化）、注册表完整性（逐槽/严格 #RRGGBB）、对比度契约全对全主题参数化、持久化（缺失/非法/往返/注释保留/重复保存单行）、切换幂等（同 id 短路 + 配置字节不变）、ttk settings 纯数据断言 + 真 Tk 集成（无显示环境 skip，仅此一条） |
+
+**二、根因与设计要点**
+
+1. **对比度先行**：先以迭代脚本把三套主题全部 token 对调到达标（正文 4.5 / 非文本 3.0），再把取值定稿进模块；light 的 `primary` 取 `#4358E8`（品牌蓝同色相加深）——原 `#4F6DF5` 与白标签 4.34:1 不达 AA，迭代脚本已删，数值由 `tests/test_ui_theme.py` 持续回归。
+2. **边框 3:1 的代价**：WCAG 1.411 非文本对比要求让 light 边框取到 `#848DA0`（比常见浅灰边框深）——机检契约优先于视觉习惯。
+3. **阶段3 的可见效果边界**：CTk 控件颜色体系由阶段4（ui_kit）接管 token，本阶段主题切换的可见效果 = CTk 外观模式映射（high_contrast 归入 dark）+ ttk 元素配色（Treeview 等阶段4 控件就位后生效）；「外观模式」菜单保留（含「跟随系统」），阶段4 统一两控件。
+4. **幂等三处**：`select` 同 id 短路（不重复写配置）、`save` 重复保存单行（update 优先于 append）、`apply` 重复注册守卫（`theme_create` 对已存在主题名抛 TclError）。
+
+**三、验证**
+
+- `pytest tests/test_ui_theme.py` → 34 passed（本机含 3 条真 Tk 集成；无头 CI 上该 3 条 skip，其余 31 条全量执行）。
+- 真窗冒烟（本机 Windows，子进程构建完整 `LiveRecorderGUI`）：无偏好时跟随系统外观落 `light` 主题；菜单显示名 i18n 正确；模拟点击「高对比度」后 `theme_manager.theme_id == "high_contrast"`、`[GUI] gui_theme` 写入临时副本生效、ttk 主题切到 `dlr-high_contrast`、CTk 外观映射 Dark、外观菜单显示同步「深色」；真实 `config.ini` 未被写入（写路径重定向）。
+- `python scripts/run_gates.py` → 8/8 全绿；全量 pytest 3286 passed / 14 skipped / 0 警告；覆盖率 84.07%（44 模块全达标）；basedpyright 0 errors / 0 warnings / 0 notes；`import gui` 无头导入成功（兼容性契约）。
+
+**四、已知边界与交回**
+
+- 真窗 Tk 集成用例在无头 CI 上 skip（ubuntu 无 X server）；若要在 CI 常态执行，可在 test job 加 xvfb（留待阶段5 一并评估）。
+- 「外观模式」与「界面主题」两个控件并存属阶段3 过渡形态（前者管 CTk 明暗含跟随系统、后者管 token 主题并持久化），阶段4 控件层替换时统一。
+
+### v4.4.0-dev (2026-09-29) — Web 后端 FastAPI → Starlette 迁移：自研路由适配器 + 零依赖校验层，24 条路由契约与全部安全不变量逐字保留
+
+> 本节是本次改动的模块级总览。阶段2（UI 现代化 · 框架替换）把 Web 管理面板后端从 FastAPI 迁移到 Starlette 直接驱动：
+> 删除 fastapi / pydantic 两个依赖，新增 `src/web_models.py`（纯标准库 dataclass 校验层）与 `src/web_api.py` 内 `_route`
+> 适配器（复刻 FastAPI 的模型参数解析 / Query 夹取 / dict→JSON 序列化 / 同步端点线程池派发语义）。所有 24 个路由处理器
+> 函数体零改动，业务逻辑与全部安全不变量（MID-*/SEV-*）逐字保留；新增 `tests/test_web_api_routes.py` 动态断言路由契约，
+> 取代被敏感门禁拦截的静态基线 `web_api_routes_baseline.json`。
+
+**一、改动按模块分类（含新增 / 修改 / 删除 + 文件路径）**
+
+| 模块 | 变更性质 | 主要文件 | 关键改动 / 判据 |
+| --- | --- | --- | --- |
+| Web 后端框架 | 迁移（去依赖） | `src/web_api.py` | `FastAPI()` → `Starlette()`；24 个 `@app.post/get/...` 装饰器替换为 `@_route(app, [METHOD], path)`；5 个 `Query(...)` 参数去装饰器化改为普通默认值；`cast(FastAPI, request.app)` → `cast(Starlette, ...)`；认证中间件改 `app.add_middleware(BaseHTTPMiddleware, dispatch=auth_middleware)` [更正 2026-09-29 运行期验证]：初稿「`@app.middleware("http")` 为 Starlette 原生支持，逐字保留」的判断有误——Starlette 无该装饰器方法，导入即抛 AttributeError（mypy attr-defined 同证），FastAPI 该装饰器底层即 `add_middleware(BaseHTTPMiddleware, dispatch=...)`；另注册 JSON 版 `HTTPException` handler（Starlette 内建 handler 回 PlainTextResponse，会丢 `{"detail": ...}` 错误契约） |
+| 请求模型校验 | 新增（零依赖） | `src/web_models.py` | 9 个 dataclass（LoginRequest / RoomCreate / RoomUpdate / RoomToggle / RoomQualityUpdate / QualityOptionsUpdate / RecordingToggle / ConfigUpdate / LanguageUpdate）以 `.parse(data)` classmethod 替代 pydantic `BaseModel`；缺字段/类型错→ValueError；bool 仅接受 Python bool；多余字段忽略 |
+| 路由适配层 | 新增 | `src/web_api.py` | `_route` 装饰器工厂：`inspect.signature` 驱动分类（模型参数 / Query 参数 / request）；JSON body 经 `_read_json_body` 解析，非法体→422；Query 按 `_QUERY_DEFAULTS` 默认值与上下界夹取；同步 def 端点经 `run_in_threadpool` 派发（对齐 FastAPI 行为，避免阻塞事件循环）；非 Response 返回值统一包 JSONResponse |
+| 测试 | 迁移 + 新增 | `tests/test_web_api.py`、`tests/test_web_config_locks.py`、`tests/test_danmaku_monitor.py`、`tests/test_regression_2026_09_22_web_g.py`、`tests/test_web_api_routes.py` | 5 处 `TestClient` import 切到 `starlette.testclient`；新增动态路由契约测试断言 24 条路由 method/path 精确集合 + `/web` 挂载点；删除 `tests/web_api_routes_baseline.json` |
+| 依赖清单 | 同步删除 | `requirements.txt`、`pyproject.toml` | 删除 `fastapi>=0.140.0` 与 `pydantic>=2.13.4`；保留 `starlette>=1.3.1` / `uvicorn` / `python-multipart`；两侧包名集合相等性经 `tests/test_regression_2026_09_22_gates.py` 实测通过 |
+
+**二、根因明细**
+
+1. **性能与体积**：FastAPI 依赖 pydantic + pydantic_core，是 Web 面板主要体积大头之一；Starlette 直接驱动后移除两者，降低打包体积与启动开销（体积待 `scripts/report_bundle_size.py` 本机复测）。
+2. **接线语义保留**：Starlette 不像 FastAPI 自动把 `def` 同步端点派发到线程池、也不自动解析 JSON body，缺失即阻塞事件循环或 422 行为偏差——`_route` 适配器逐项补回等价语义，处理器函数体零改动。
+3. **422 契约偏差（已知）**：旧 pydantic 的字段级 422 detail 改为字符串 detail（`str(ValueError)`）；前端 `apiError()` 只读取 detail 文案，行为兼容。
+
+**三、验证（2026-09-29 运行期复测，venv 已恢复）**
+
+- `python scripts/run_gates.py` → **8/8 全绿**（black / isort / mypy / 注释规范 / compile_po / check_version / check_runtime_pins / pytest 兜底）。
+- `pytest` → **3248 passed, 14 skipped, 0 failed，warnings summary 为空**；`--cov=src` 后 `scripts/check_coverage.py` 43 模块全部达标（总覆盖 83.98%）；`basedpyright` 0 errors / 0 warnings / 0 notes。
+- `pytest tests/test_web_api.py tests/test_web_api_routes.py -q` → 165 passed, 2 skipped, 0 warnings。
+- 运行期抓出并修复两处接线错误（此前仅静态验证未能发现）：
+  1. `@app.middleware("http")` 在 Starlette 上导入即抛 AttributeError（P0，面板不可用）→ 改 `add_middleware(BaseHTTPMiddleware, dispatch=auth_middleware)`；
+  2. 端点内 `raise HTTPException` 的响应体被 Starlette 内建 handler 写成纯文本 detail，`{"detail": ...}` JSON 契约漂移（批量安全用例转红）→ 注册 FastAPI 同款 JSON handler（headers 透传保留 Retry-After 等用法）。
+- 配套修正：`scripts/check_version.py` 的 web_api 版本检查对象从 `FastAPI(version=)` 换成 importlib.metadata 动态读取形态（MIN-2262 fail-closed 语义保留，三分支变异验证通过）；`tests/frontend/test_regression_2026_09_22_gates.mjs` 的 MID-2241 字段扫描锚点迁到 `src/web_models.py`、端点截取锚点迁到 `@_route(app, ["GET"], "/api/language")`；`test_web_api.py` 的 `/health` version 断言改读同源 `_APP_VERSION`；`uv.lock`/`egg-info` 经 `sync_metadata.py` 重建（requires.txt 已无 fastapi/pydantic）。
+
+**四、未实测与交回动作（已闭环）**
+
+- ~~门禁全绿与运行期验证~~：已完成（见「三、验证」）。
+- 仍交回后续阶段：打包体积复测 `python scripts/report_bundle_size.py dist/DouyinLiveRecorder` 需先跑一次 `build_exe.py`（本机 dist/ 为空；属阶段5 收尾项）。注意本机 venv 仍残留已卸载清单的 fastapi/pydantic 包（`pip install -r requirements.txt` 不卸载旧包），门禁与测试不受影响，打包复测前建议由用户在普通终端 `pip uninstall fastapi pydantic` 确保环境与清单一致。
+
+**五、破坏性变更**
+
+- 移除 `fastapi` / `pydantic` 运行时依赖；`src/web_models` 模型以 `.parse()` 读取而非 pydantic API（内部使用，对外部插件无影响）。其余路由、请求/响应形态、安全头与鉴权中间件行为不变。
+
+### v4.4.0-dev (2026-09-29) — Web 前端动效层（阶段1）：滚动入场 / 视差粒子 / reduced-motion 降级，零依赖零构建
+
+> 模块级总览：阶段1（UI 现代化 · 前端动效）新增 `web/motion.js`（223 行、零依赖 IIFE，挂载 `window.__dlrMotion`），
+> `web/index.html` 加 `<canvas id="bg-canvas">` 背景层与脚本引用，`web/style.css` 增动效 token 与
+> `prefers-reduced-motion` 全覆盖。**动效只加 class、不插包裹元素**——`tests/frontend/*.mjs` 的
+> `tbody.innerHTML` 片段断言回归锁不受影响；动态渲染的表格行不参与入场动效。
+
+**一、改动按模块分类（含新增 / 修改 + 文件路径）**
+
+| 模块 | 变更性质 | 主要文件 | 关键改动 / 判据 |
+| --- | --- | --- | --- |
+| 动效引擎 | 新增 | `web/motion.js` | 单 rAF 循环、IntersectionObserver 入场（threshold 0.15、rootMargin `0px 0px -8% 0px`、错峰 `min(index*40, 240)ms`、命中即一次性 unobserve）、DPR 封顶 2、`document.hidden` 暂停、`prefers-reduced-motion: reduce` 全降级、`destroy()` 无残留定时器；粒子数 `clamp(18, floor(视口面积/22000), 64)`，视口 <768px 或 `hardwareConcurrency ≤ 4` 时减半 |
+| 页面接线 | 修改 | `web/index.html` | `<body>` 首行加 `<canvas id="bg-canvas" aria-hidden="true">`（pointer-events:none、z-index -1）；末尾加 `<script src="/web/motion.js">`（defer，不阻塞首屏） |
+| 动效样式 | 修改 | `web/style.css` | `#bg-canvas` 固定层、`.reveal`/`.is-revealed` 过渡、`:focus-visible` 焦点环、`@media (prefers-reduced-motion: reduce)` 全覆盖（动效段约 508–547 行）；过渡只动 transform/opacity/border-color/box-shadow，不触发布局属性 |
+| 测试 | 新增 | `tests/frontend/test_motion.mjs` | 5 用例（node:test + node:vm 沙箱驱动 motion.js：降级闸门 / 入场 / 粒子参数 / 隐藏暂停 / destroy 清理），零 npm 依赖 |
+
+**二、验证与已知偏差**
+
+- `node --test tests/frontend/*.mjs` → **65/65 全绿**（既有回归锁 + 新增 5 条）；`tbody.innerHTML` 片段断言不破坏。
+- **已知偏差**：motion.js 实测 9449 字节（≈9.2KB），超出提案 §5.1 的 ≤8KB 性能预算约 15%——defer 加载不阻塞首屏、单 rAF 与读写分离已达标，体积偏差留待阶段5 收尾评估（压缩/拆分均可，不影响功能）。
 
 ### v4.4.0-dev (2026-09-29) — Web 面板移动端适配修复：顶栏两行化 + safe-area / `dvh` 适配 + 数据表面板内滚动，消除 iPhone 16 Pro Max 与 Pixel 10 上的裁切与横向滚动
 

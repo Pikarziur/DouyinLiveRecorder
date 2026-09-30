@@ -33,6 +33,12 @@ _QUALITY_NON_DISPLAY_FIELDS = frozenset({"last_seen", "recording", "alert_at"})
 # 「状态线程先于本轮告警行到达」的竞态（宁可晚一个周期清，也不要把仍在降级的房间误判为正常）。
 _QUALITY_ALERT_TTL_SECONDS = 240.0
 
+# 「彻底退出」复用在途「停止录制」线程时的等待预算（M-16，秒）。
+# 取 25s = 停止链自身的上限：proc.wait(timeout=15) + taskkill(timeout=5) + proc.wait(timeout=5)。
+# 超过它不再干等——退出路径随后仍会在 _stop_child_once 的锁上排队，且拿锁后会先复核
+# proc.poll()，所以「等不到」最坏只是多等一轮，不会二次附着控制台。
+_STOP_REUSE_JOIN_SECONDS = 25.0
+
 
 # 判定某房间的降级告警是否已被后续正常轮次取代（MID-54 的纯判据，独立成函数供用例直接驱动）。
 #
@@ -157,11 +163,16 @@ import tkinter as tk
 import traceback
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from tkinter import messagebox
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast, final
 
 import customtkinter as ctk
+
+# ScalingTracker 不经 customtkinter 顶层命名空间导出（顶层取用报 reportAttributeAccessIssue），
+# 从定义路径显式导入：自适应折行的 wraplength 缩放率折算取自这里
+from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker
 from PIL import Image, ImageDraw
 
 # GUI 父进程标记：必须先于任何 src 导入设置——src.logger 在导入期读取该标记决定
@@ -175,6 +186,7 @@ os.environ["DLR_GUI_PARENT"] = "1"
 import i18n as i18n_module
 from src.config_bool import parse_config_bool
 from src.logger import child_process_env, logger
+from src.ui_theme import DEFAULT_THEME, THEME_IDS, ThemeManager, load_theme_preference, save_theme_preference
 from src.utils import mask_credentials
 from src.web_config import (
     find_room_url_by_anchor_name,
@@ -393,6 +405,89 @@ def _mix(color_a: str, color_b: str, ratio: float) -> str:
     g = round(ga + (gb - ga) * ratio)
     b = round(ba + (bb - ba) * ratio)
     return f"#{r:02X}{g:02X}{b:02X}"
+
+
+# 阶段3 过渡映射：token 主题 → CTk 外观模式。high_contrast 归入 dark（CTk 无高对比模式，
+# 先取深色让终端/弹幕区与主题气质一致）；阶段4 token 整窗重绘接管后本表退役。
+_THEME_CTK_MODE: dict[str, str] = {"light": "light", "dark": "dark", "high_contrast": "dark"}
+
+# 主题 id → i18n msgid（菜单显示名）。msgid 用简中原文（本仓 msgid 惯例），四语目录同批维护。
+_THEME_LABELS: dict[str, str] = {"light": "浅色", "dark": "深色", "high_contrast": "高对比度"}
+
+
+def _ctk_mode_to_theme(mode: str) -> str:
+    # CTk 外观模式（get_appearance_mode 返回 "Light"/"Dark"）→ 主题 id。
+    # get_appearance_mode 不会返回 "System"（已解析成明暗），未识别值按编程性意外回默认主题。
+    normalized = mode.strip().lower()
+    return normalized if normalized in THEME_IDS else DEFAULT_THEME
+
+
+def _compute_wraplength(width_device_px: float, scale: float, margin: int = 8) -> int:
+    # 由标签窗口的设备像素宽折算 wraplength 逻辑值。CTk 对 wraplength 做 DPI 缩放
+    # （ctk_label.py configure 时乘 _widget_scaling），而 <Configure> 事件给的是设备像素，
+    # 故须除以控件缩放率折回；120 逻辑像素是下限——极窄容器里宁可逐字折行也不得让
+    # wraplength 掉到 0（0 = 不折行 = 回到两侧裁切的老路）。
+    if scale <= 0:
+        scale = 1.0
+    return max(120, int((width_device_px - margin) / scale))
+
+
+def _wrap_should_apply(current: int, new: int, scale_changed: bool) -> bool:
+    # 迟滞判据（纯函数，供无头测试）：新值与已应用值差异显著才写。
+    # 阈值取 max(12, 2%)：滚动条出现/消失让容器宽 ±~11 逻辑像素，若逐次照写，
+    # 「折行变高 → 滚动条翻转 → 宽度变化 → 再折行」会在阈值边界无限互振；
+    # 缩放率变化（跨屏拖拽 / 系统 DPI 调整）说明设备像素↔逻辑值的换算基准变了，
+    # 必须强制重算一次。current==0（从未应用）恒写。
+    if current == 0:
+        return True
+    if scale_changed:
+        return True
+    return abs(new - current) > max(12, int(current * 0.02))
+
+
+def _bind_adaptive_wraplength(label: ctk.CTkLabel, margin: int = 8, debounce_ms: int = 120) -> None:
+    # 长提示文案自适应换行（防抖 + 迟滞版，2026-09-29 卡死事故修复）。
+    #
+    # 为什么必须防抖：CTk 的 DPI 重缩放走 update_scaling_callbacks_* → 各控件 _set_scaling →
+    # _draw → _update_dimensions_event → update_idletasks 的**递归互泵**（ctk_scrollbar.py 深处）。
+    # 重缩放期间内部标签宽度剧烈瞬时摆动（实测 350↔1566 设备像素），若在 <Configure> 里同步
+    # 追写 wraplength，每次写入又使几何再失效、排进同一 idle 队列——队列永远排不空，
+    # update()/mainloop 永不返回（实测 10 次 DPI 翻转即卡死；no-op 对照组 9.2s 正常跑完）。
+    # 防抖把写入推迟到事件风暴安静 120ms 之后：风暴期间零写入，结构性不可能反馈进递归。
+    #
+    # 前提仍是标签以 pack(fill=tk.X) 布局——窗口宽由 packer 分配，与标签自请求解耦；
+    # 绑定时若已有实宽（启动重建场景）同步先应用一次，让首帧即成形，后续变更走防抖。
+    state: dict[str, Any] = {"job": None, "last_scale": None, "last_applied": 0}
+
+    def _run() -> None:
+        state["job"] = None
+        try:
+            scale = ScalingTracker.get_widget_scaling(label)
+            wrap = _compute_wraplength(label.winfo_width(), scale, margin)
+        except tk.TclError:
+            # 标签已销毁（弹幕/画质占位每轮刷新重建，防抖回调可能与销毁竞态）
+            return
+        scale_changed = state["last_scale"] is not None and scale != state["last_scale"]
+        state["last_scale"] = scale
+        if not _wrap_should_apply(state["last_applied"], wrap, scale_changed):
+            return
+        try:
+            label.configure(wraplength=wrap)
+        except tk.TclError:
+            return
+        state["last_applied"] = wrap
+
+    def _adapt(event: tk.Event) -> None:
+        # 真防抖：风暴期间每个 Configure 都重置计时器，风暴不安静就**一次都不写**——
+        # 结构性杜绝把几何失效喂回 CTk 的重缩放递归（节流式「每 120ms 写一次」在风暴中途
+        # 的写入仍可能经滚动条阈值互振重新点燃递归，故不采用）。
+        if state["job"] is not None:
+            label.after_cancel(state["job"])
+        state["job"] = label.after(debounce_ms, _run)
+
+    label.bind("<Configure>", _adapt, add="+")
+    if label.winfo_width() > 1:
+        _run()
 
 
 # 系统托盘管理器：构建菜单图标、处理托盘交互与跨平台运行模型。
@@ -1012,24 +1107,264 @@ def _send_ctrl_break_to_child(pid: int) -> bool:
         _restore_own_console()
 
 
+# ─── 子进程状态行匹配（M-14）与外部数据数值容错（M-15 / M-17） ───
+#
+# 两类工具都只服务 LiveRecorderGUI「解析外部数据」的路径，放在类定义之前便于用例直接驱动
+# （tests/test_gui_status_pattern_i18n.py / tests/test_gui_tail_robustness.py 经子进程调用
+# 本模块真实实现，不在 pytest 进程 import gui）。
+#
+# 外部数据数值字段的**唯一**容错口径（M-15 的 ts 容错与 M-17 的逐事件容错同族，刻意只写一份）：
+# None / 空串 / 非数值字符串一律回落 default，合法数值原样取值——对合法输入与改动前的
+# float()/int() 行为逐字一致，只是不再抛 TypeError/ValueError。
+# 触发源真实存在：弹幕边车 logs/danmaku_monitor.jsonl 是外部可控数据，且 tail 首读会回放
+# 旧文件末尾 64KB 的历史记录（文件头 2026-09-12 审查 6.2 已记过 float(None) 的事故）。
+def _as_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(cast(Any, value))
+    except TypeError, ValueError:
+        return default
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    # OverflowError 也在列：JSON 允许 Infinity 字面量，float('inf') 过 int() 即抛它，
+    # 少了这一条 M-17 的「逐事件防护」会被一条脏数据重新打穿。
+    try:
+        return int(cast(Any, value))
+    except TypeError, ValueError, OverflowError:
+        return default
+
+
+# 三条状态行的 msgid：必须与**生产侧逐字相同**，否则 tr() 查不到键、退化为恒等映射，
+# 非简中界面下依旧匹配不上。生产侧出处（本工作包只读、不得改动）：
+#   src/recorder_status.py::display_info → tr("{recording_live}[{qa}] 正在录制中 {have_record_time}")
+#   src/recorder_status.py::display_info → tr("\r没有正在录制的直播 循环监测间隔时间：{delay_default}秒")
+#   main.py 录制启动处（ffmpeg 分支与强制直下分支共用同一条 msgid，见 MID-68）→
+#     tr("{record_name} 画质降级：设置 {record_quality_zh}({record_quality}) 实际 {actual_quality_zh}({actual_quality_code})")
+_STATUS_TPL_RECORDING = "{recording_live}[{qa}] 正在录制中 {have_record_time}"
+_STATUS_TPL_IDLE = "\r没有正在录制的直播 循环监测间隔时间：{delay_default}秒"
+_STATUS_TPL_DOWNGRADE = (
+    "{record_name} 画质降级：设置 {record_quality_zh}({record_quality})"
+    " 实际 {actual_quality_zh}({actual_quality_code})"
+)
+# [2026-09-29 M-14②] 刻意不对称的一条：该串生产侧**未过 tr()**
+# （src/recorder_status.py::display_info 裸写 print("\r没有正在监测和录制的直播")），
+# 它是否被翻译完全取决于 main.py 的 `builtins.print = translated_print` 补丁加上
+# i18n._should_translate 对调用方文件路径前缀的判定——后者在 PyInstaller 冻结下对全部
+# print 是否仍成立**尚未实测**（CODE_REVIEW_2026-09-29_2 M-20 标「待核实」），且四语目录
+# 缺件时也会退回原文。故 GUI 侧必须「tr() 结果 + 原文」两种形态都认：
+# 不得因为「生产侧源码里没看到 tr()」就删掉原文匹配（冻结/缺目录时功能立刻失效），
+# 也不得反过来只留原文（源码运行 + 英文界面时该串是英文，空态清除同样静默失效）。
+_STATUS_TPL_EMPTY = "\r没有正在监测和录制的直播"
+
+# 各条模板中 GUI **必须取用**的占位符（= 下面正则片段表里登记过的那些）。
+# 译文若把它们删掉，拼不出可用正则 → 该类行判为不可解析并留痕，而不是默默匹配不上。
+_STATUS_REQUIRED_RECORDING = ("recording_live", "qa")
+_STATUS_REQUIRED_DOWNGRADE = (
+    "record_name",
+    "record_quality_zh",
+    "record_quality",
+    "actual_quality_zh",
+    "actual_quality_code",
+)
+
+# 各占位符在**译文**里应展开成的正则片段；未列出的占位符（时长、间隔秒数）按通配处理，
+# GUI 不取用其值。按名字映射，所以译者可自由调整占位符顺序（2026-09-29 实测四语目录顺序
+# 与原文一致，但本实现不依赖这一一致性）。
+# 键名即命名捕获组名，必须是合法标识符。
+# F-06（2026-09-12 审查修复）的两条语义在这里逐字保持，不得回退：
+#   recording_live 贪婪 .+  —— 主播名里的 "[...]" 不能被当成画质段边界；
+#   qa            [^\]]+ —— 使**最后一个** [...] 成为画质段。
+_STATUS_CAPTURE_GROUPS: dict[str, str] = {
+    "recording_live": r"(?P<recording_live>.+)",
+    "qa": r"(?P<qa>[^\]]+)",
+    "record_name": r"(?P<record_name>.+?)",
+    "record_quality_zh": r"(?P<record_quality_zh>.+?)",
+    "record_quality": r"(?P<record_quality>.+?)",
+    "actual_quality_zh": r"(?P<actual_quality_zh>.+?)",
+    "actual_quality_code": r"(?P<actual_quality_code>.+?)",
+}
+
+# 哨兵：非可打印控制字符包裹的占位符名。译文里不可能出现同形态串，故可安全地当切分锚点用。
+_STATUS_SENTINEL = "\x00"
+_STATUS_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_STATUS_SENTINEL_SPLIT_RE = re.compile("\x00([A-Za-z_][A-Za-z0-9_]*)\x00")
+
+
+# 把模板变成「字面段 + \x00占位符名\x00 哨兵」的形态，供后续切段。
+# translated=True 走 tr()（先查表、后插值）：为什么不能裸 `i18n_module.tr(template)`——
+# tr() 不喂实参时 str.format 因缺键抛 KeyError、被 MI-23 的兜底吃掉，返回的是**未翻译**的
+# 原文模板，于是非简中语言下这里永远拿到简中串。给每个占位符喂 \x00名字\x00 哨兵即可让
+# tr() 正常走完「查表 + 插值」，同时把占位符位置保留下来。只用公开接口，不碰 i18n._tr
+# （_tr 是 tests/conftest.py 恒等钉定的对象，依赖它会让用例与真实目录行为分叉）。
+# translated=False 取原文模板形态：录制子进程在「目录缺件 / builtins.print 补丁未生效」
+# 的部署下输出的正是原文（见 _STATUS_TPL_EMPTY 注释），两侧必须同样认得。
+def _sentinel_text(template: str, *, translated: bool) -> str:
+    if not translated:
+        return _STATUS_PLACEHOLDER_RE.sub(lambda m: f"{_STATUS_SENTINEL}{m.group(1)}{_STATUS_SENTINEL}", template)
+    names = {m.group(1) for m in _STATUS_PLACEHOLDER_RE.finditer(template)}
+    if not names:
+        return i18n_module.tr(template)
+    return i18n_module.tr(template, **{name: f"{_STATUS_SENTINEL}{name}{_STATUS_SENTINEL}" for name in names})
+
+
+# 按哨兵切成 (是否占位符, 段内容) 序列（re.split 带一个捕获组 → 奇数位即占位符名）。
+def _split_sentinels(text: str) -> list[tuple[bool, str]]:
+    parts: list[tuple[bool, str]] = []
+    for index, chunk in enumerate(_STATUS_SENTINEL_SPLIT_RE.split(text)):
+        if index % 2 == 0:
+            if chunk:
+                parts.append((False, chunk))
+        else:
+            parts.append((True, chunk))
+    return parts
+
+
+# 切段 → 带命名捕获组的正则。字面段一律 re.escape：译文里的 "." "(" "：" 都是普通字符，
+# 不是正则元字符，转义后译者改标点/改空格都不会让匹配漂移——这正是 AGENTS「关键约定 #13」
+# 「比较对象一律取 i18n.tr(...) 后形态、不得拿自然语言子串当协议」的落地形态。
+# 返回 None = required 里的占位符在该形态下取不到（正则必然永远匹配不上，显式判不可用）。
+def _compile_parts(parts: list[tuple[bool, str]], required: tuple[str, ...]) -> re.Pattern[str] | None:
+    body: list[str] = []
+    captured: set[str] = set()
+    for index, (is_placeholder, segment) in enumerate(parts):
+        if not is_placeholder:
+            literal = segment[1:] if index == 0 and segment.startswith("\r") else segment
+            body.append(re.escape(literal))
+            continue
+        fragment = _STATUS_CAPTURE_GROUPS.get(segment)
+        if fragment is None:
+            # 取值段（已录时长 / 循环间隔秒数）：GUI 不解析它的值，只要求「那里有内容」。
+            # 末位用 .*（该行到此为止也要匹配），其余位置用 .*? 以保证后续字面段能回溯。
+            body.append(".*" if index == len(parts) - 1 else ".*?")
+            continue
+        if segment in captured:
+            # 同名的第二个占位符：re 不允许重名捕获组（re.error: redefinition of group name），
+            # 降级为不捕获——第一个同名段已经拿到了值。
+            body.append(fragment.replace(f"(?P<{segment}>", "(?:", 1))
+            continue
+        body.append(fragment)
+        captured.add(segment)
+    if any(name not in captured for name in required):
+        return None
+    return re.compile("".join(body))
+
+
+# 单条模板 → 可用正则 + 降级说明。先按 tr() 结果组装；组装不出（译稿删了必需占位符）时
+# 记一条 problems 并回退到原文模板形态——子进程若同样取不到译文（目录缺件）输出的就是原文，
+# 回退后两侧仍对齐；若子进程拿到的是坏译文，则本语言下该类行不解析，但**有留痕**。
+def _pattern_from_template(template: str, required: tuple[str, ...]) -> tuple[re.Pattern[str] | None, tuple[str, ...]]:
+    pattern = _compile_parts(_split_sentinels(_sentinel_text(template, translated=True)), required)
+    if pattern is not None:
+        return pattern, ()
+    detail = "状态行译文取不到必需占位符，已回退原文模板匹配（请核对 i18n 目录该条译文）"
+    fallback = _compile_parts(_split_sentinels(_sentinel_text(template, translated=False)), required)
+    if fallback is None:
+        return None, (detail + "；原文模板同样不可用",)
+    return fallback, (detail,)
+
+
+# 空态行的子串匹配表：命中任一即清除全部录制标记。
+# 取「第一个占位符之前」的字面段作子串（zh「没有正在录制的直播 循环监测间隔时间：」、
+# en "No live rooms being recorded. Loop monitoring interval: "），尾部实参不参与匹配，
+# 免得 delay_default 一变就失配；无占位符的那条（_STATUS_TPL_EMPTY）自然取整串。
+# tr() 结果与原文两种形态**都收**（去重后保留顺序），理由见 _STATUS_TPL_EMPTY 注释。
+def _idle_needles() -> tuple[str, ...]:
+    needles: list[str] = []
+    for template in (_STATUS_TPL_IDLE, _STATUS_TPL_EMPTY):
+        for translated in (True, False):
+            text = _sentinel_text(template, translated=translated)
+            needle = text.split(_STATUS_SENTINEL, 1)[0].lstrip("\r").strip()
+            if needle and needle not in needles:
+                needles.append(needle)
+    return tuple(needles)
+
+
+@dataclass(frozen=True)
+class _StatusPatterns:
+    # 录制中行 / 画质降级行的正则；None = 该语言下这条模板拼不出可用正则（目录被写坏），
+    # 该类行不解析，并由 problems 留痕。空态子串表独立工作，不受影响。
+    recording: re.Pattern[str] | None
+    downgrade: re.Pattern[str] | None
+    # 空态行子串（tr() 结果 + 原文两种形态）
+    idle_needles: tuple[str, ...]
+    # 组装期的降级说明：由 _parse_quality_log 经 self._log 呈现一次。刻意不走 logger.*
+    # ——那等于新增一条内部诊断 msgid，要同步四语目录（AGENTS「关键约定 #14」），
+    # 而这条只在「译稿被写坏」时出现，与本文件其余 GUI 内部提示同走 self._log。
+    problems: tuple[str, ...]
+
+
+def _build_status_patterns() -> _StatusPatterns:
+    recording, recording_problems = _pattern_from_template(_STATUS_TPL_RECORDING, _STATUS_REQUIRED_RECORDING)
+    downgrade, downgrade_problems = _pattern_from_template(_STATUS_TPL_DOWNGRADE, _STATUS_REQUIRED_DOWNGRADE)
+    return _StatusPatterns(
+        recording=recording,
+        downgrade=downgrade,
+        idle_needles=_idle_needles(),
+        problems=recording_problems + downgrade_problems,
+    )
+
+
+# 语言 → 已组装的匹配器。缓存键取 i18n.get_language()（MID-52 起它恒等于**实际装载**的
+# 语言码，不会「请求 zh_TW、实际 en_US」两侧漂移），故语言一变必然 miss、必然重算——
+# 这就是 M-14 要求的失效时机，参照 gui.py 现有两处 set_language 调用点
+# （_build_sidebar 初值 / _on_language_change 热切换）设计。
+# **不得改成模块级一次编译**：那等价于把简中串钉死，正是本条要消灭的故障形态。
+_STATUS_PATTERNS_BY_LANG: dict[str, _StatusPatterns] = {}
+# 组装期「语言是否被切走」复核的重试上限，判据见 _status_patterns 的竞态说明。
+_STATUS_PATTERNS_STABLE_ATTEMPTS = 3
+
+
+def _status_patterns() -> _StatusPatterns:
+    # 并发下最坏是同一语言被组装两遍（纯函数 + 原子赋值），不会读到半成品，故不加锁。
+    # 已知边界：目录文件在运行期被替换而语言码不变时，本缓存不会重算——GUI 没有
+    # 「重载目录」入口，语言变化必然经 set_language 换码，因此不构成实际失配路径。
+    # [2026-09-29 补充] 「原子赋值」挡不住**组装过程中**换语言：_build_status_patterns() 要连读
+    # 6 次 i18n.tr()，而本函数由录制输出线程调用（_parse_quality_log ← _read_output）、
+    # set_language 由 UI 线程调用（语言菜单 / 启动初值）。语言在这 6 次读取之间被切走时，组出来的
+    # 是**混语** patterns；原实现会把它永久存进当时的语言键下（缓存没有失效时机），于是画质监控页
+    # 拿中英混排的串去匹配纯英文行、长期静默失配——正是 M-14 要消灭的那一类故障。改法：组装后复验
+    # 语言码未变才落缓存，变了就按新语言重取；连续不稳（用户反复快速切语言）时返回最后一遍的结果
+    # 但**不写缓存**，把混语形态的存活期压在一轮之内。仍然不加锁——set_language 不持本模块的锁，
+    # 加锁也只是把竞态窗口挪个位置，复核才能真的证伪「组装期间没换过语言」。
+    for _attempt in range(_STATUS_PATTERNS_STABLE_ATTEMPTS):
+        lang = i18n_module.get_language()
+        cached = _STATUS_PATTERNS_BY_LANG.get(lang)
+        if cached is not None:
+            return cached
+        built = _build_status_patterns()
+        if i18n_module.get_language() == lang:
+            _STATUS_PATTERNS_BY_LANG[lang] = built
+            return built
+    return _build_status_patterns()
+
+
 # 直播录制 GUI 主类：整合界面、子进程录制、日志队列与画质监控。
 @final
 class LiveRecorderGUI:
 
     ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
     # 画质降级告警："{name} 画质降级：设置 {zh}({code}) 实际 {zh}({code})"
-    QUALITY_DOWNGRADE_PATTERN = re.compile(r"(.+?) 画质降级：设置 (.+?)\((.+?)\) 实际 (.+?)\((.+?)\)")
+    # [2026-09-29 M-14] 此处原为 `re.compile(r"(.+?) 画质降级：设置 (.+?)\((.+?)\) 实际 (.+?)\((.+?)\)")`：
+    # 硬编码简中正则，而这类行的生产侧全部经 i18n.tr 输出，用户切到 en_US/en_GB/zh_TW 后
+    # 画质监控页静默停摆（AGENTS「关键约定 #13」）。匹配串现由**与生产侧同 msgid 的
+    # tr() 结果**派生并按语言惰性重算，定义收敛到模块级 _status_patterns()；
+    # 本轮刻意不引入 #DLRQ| 结构化协议（AGENTS 列为「待批准长期方案」）。
     # 录制中行："{name}[{quality}] 正在录制中 {duration}"
     # 2026-09-12 修复（CODE_REVIEW_FIX_1 F-06）：原 name/quality 两段皆非贪婪，主播名里的 "[...]"
     # 会被当成画质段边界——「主播[1号][原画] 正在录制中」解析成 name="主播"、quality="1号][原画"，
     # 画质监控表出现幽灵行、画质切换反查主播名失败（与 config_io 的段级解析不对齐）。
     # 现 name 段贪婪 + quality 段限定「不含 ] 的字符」，使最后一个 `[...]` 成为画质段，主播名方括号原样保留。
-    RECORDING_LINE_PATTERN = re.compile(r"^(.+)\[([^\]]+)\] 正在录制中")
+    # [2026-09-29 M-14] 同上改由 tr() 派生；F-06 的这两段语义在 _STATUS_CAPTURE_GROUPS 里
+    # 逐字保持（recording_live 贪婪 .+ / qa 限定 [^\]]+），不得回退。
+    # 空态行（"没有正在录制" / "没有正在监测和录制的直播"）同批收敛，见 _parse_quality_log。
     _MAX_LOG_LINES = 1000
     _LOG_TRIM_TO = 800
     _LOG_FLUSH_INTERVAL = 200
     _STATUS_REFRESH_INTERVAL = 10000  # 未录制时的刷新间隔（毫秒）
     _STATUS_REFRESH_INTERVAL_ACTIVE = 3000  # 有录制直播间时的刷新间隔（毫秒）
+    # 周期链异常留痕的限频窗口（秒，M-15，见 _warn_chain）：故障是持续性的，
+    # 不限频会让每秒/每 3 秒一条把日志页刷满；全静默又让编程错误不可见。
+    _CHAIN_WARN_INTERVAL_SECONDS = 30.0
 
     # 由构建方法（_build_*）初始化的实例组件声明，供类型检查器识别。
     # customtkinter 无类型存根，CTkFrame 推断为 Unknown；改用有 typeshed 存根的
@@ -1044,6 +1379,7 @@ class LiveRecorderGUI:
     _big_dot_item: int
     sidebar_status_label: ctk.CTkLabel
     appearance_menu: ctk.CTkOptionMenu
+    theme_menu: ctk.CTkOptionMenu
     language_menu: ctk.CTkOptionMenu
     big_status_label: ctk.CTkLabel
     big_status_sub: ctk.CTkLabel
@@ -1096,6 +1432,19 @@ class LiveRecorderGUI:
         self.main_config_file = os.path.join(self.app_root, "config", "config.ini")
         self.downloads_dir = os.path.join(self.app_root, "downloads")
 
+        # 阶段3 主题层：ttk 主题注册 + 偏好持久化（[GUI] gui_theme）。未设置（""）时按 CTk
+        # 外观模式解析出的明暗落主题——保持升级前「跟随系统」的行为，只有显式选择过的主题
+        # 才覆盖它（并在上面把外观模式同步成主题归属）。CTk 控件的颜色体系由阶段4（ui_kit）
+        # 接管 token；本阶段主题切换的可见效果 = 外观模式映射 + ttk 元素配色。
+        self.theme_manager = ThemeManager()
+        saved_theme = load_theme_preference(self.main_config_file)
+        if saved_theme:
+            self.theme_manager.select(saved_theme)
+            ctk.set_appearance_mode(_THEME_CTK_MODE.get(saved_theme, "dark"))
+        else:
+            self.theme_manager.select(_ctk_mode_to_theme(ctk.get_appearance_mode()))
+        self.theme_manager.apply(self.root)
+
         # 进程状态（线程安全访问）
         self._process_lock = threading.Lock()
         self._process: subprocess.Popen[str] | None = None
@@ -1110,6 +1459,29 @@ class LiveRecorderGUI:
         # 收尾回调携带启动时刻捕获的 session_id，执行前校验是否仍是当前会话，
         # 不一致即说明已被新会话取代，直接跳过。
         self._session_id = 0
+
+        # M-16（2026-09-29 审查）：「停止录制」与「彻底退出」都要对同一子进程执行
+        # FreeConsole→AttachConsole→GenerateConsoleCtrlEvent→FreeConsole，而控制台附着是
+        # **进程全局**状态——两条链并发时 CTRL_BREAK 会错投/丢失，最坏退化成 taskkill 硬杀，
+        # 子进程 safe_exit 清理 ffmpeg 的机会随之失去。停止链后台最长跑 15s+（wait timeout），
+        # 这期间托盘/侧栏「退出」仍然可点，并发窗口真实存在。
+        # 两个字段、两把锁、层次各一（AGENTS「调用方持锁 vs 内部自持锁 二选一」口径）：
+        #   _stop_inflight_lock 只保护 _stop_inflight 字段本身，持锁期仅一次赋值/读取；
+        #   _console_stop_lock 是「停止子进程」临界区的串行化闸门，**只由
+        #   _stop_child_once 在其 with 块内持锁**，被它调用的 _send_stop_signal_and_wait
+        #   一律不得自己再加锁、也不得被别处直接调用（改完请 grep 调用点）。
+        # 均为普通 threading.Lock：本文件无协程、不存在跨 await 持锁（AGENTS 的 RLock 强制
+        # 条款针对跨 await 场景），且刻意用非重入锁——嵌套调用本方法属实现错误，应当当场炸出。
+        self._stop_inflight: threading.Thread | None = None
+        self._stop_inflight_lock = threading.Lock()
+        self._console_stop_lock = threading.Lock()
+
+        # M-15：三条 after 自续期链（状态刷新 / 弹幕刷新 / 日志 flush）的异常留痕限频时刻，
+        # key 为链名。仅 UI 线程读写（root.after 回调只可能跑在主线程），故不加锁。
+        self._chain_warn_at: dict[str, float] = {}
+
+        # M-14：状态行正则组装期的降级说明（按语言惰性重算，problems 变化才重记一条日志）。
+        self._status_pattern_problems: tuple[str, ...] | None = None
 
         self.output_thread: threading.Thread | None = None
 
@@ -1240,13 +1612,20 @@ class LiveRecorderGUI:
         if not self._pump_active:
             return
 
-        # 后台线程只往日志队列放数据，由这里在 UI 线程按需激活刷新链
-        with self._log_queue_lock:
-            has_data = self._log_queue_has_data
-        if has_data and self._log_flush_job_id is None:
-            self._log_flush_job_id = self.root.after(self._LOG_FLUSH_INTERVAL, self._schedule_log_flush)
-
-        self._ui_pump_job_id = self.root.after(100, self._pump_ui_events)
+        # [2026-09-29 M-15 补齐] 本函数是第四支同族自续期 after 链：续期原写在函数最后一句，
+        # 而它前面的「激活日志刷新链」会在窗口销毁竞态中抛 TclError——一抛就跳过续期，UI 事件泵
+        # 永久停摆，post_ui 排队的 _on_recording_stopped / _finalize_quit 从此不再执行
+        # （用户视角 = 关不掉窗口）。形态一律照 M-15 定稿：经 _after_retry 重排并落 finally。
+        try:
+            # 后台线程只往日志队列放数据，由这里在 UI 线程按需激活刷新链
+            with self._log_queue_lock:
+                has_data = self._log_queue_has_data
+            if has_data and self._log_flush_job_id is None:
+                # 重排失败时 _after_retry 返回 None，_log_flush_job_id 保持「未激活」态，
+                # 下一轮泵仍会重试激活。不得把失败写成「已有一个作业」，否则刷新链无人唤醒。
+                self._log_flush_job_id = self._after_retry(self._LOG_FLUSH_INTERVAL, self._schedule_log_flush)
+        finally:
+            self._ui_pump_job_id = self._after_retry(100, self._pump_ui_events)
 
     # ─── 进程状态线程安全访问 ───────────────────────────────
 
@@ -1387,6 +1766,41 @@ class LiveRecorderGUI:
         self.appearance_menu.pack(fill=tk.X, padx=2, pady=(0, 12))
         self.appearance_menu.set("跟随系统")
 
+        # 界面主题（阶段3）：token 主题选择，选择即写回 config.ini [GUI] gui_theme 并注册
+        # ttk 主题。显示名经 i18n（外观模式菜单的硬编码中文是既有遗留，阶段4 统一两控件时处理）。
+        ctk.CTkLabel(
+            bottom,
+            text=i18n_module.tr("界面主题"),
+            font=Fonts.small(),
+            text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
+            anchor=tk.W,
+        ).pack(fill=tk.X, padx=6, pady=(0, 4))
+        # 显示名 → 主题 id 反查表；展示顺序固定 light → dark → high_contrast，与 THEME_IDS 一致
+        self._theme_ids_by_display: dict[str, str] = {}
+        _theme_values: list[str] = []
+        for _tid in THEME_IDS:
+            _display = i18n_module.tr(_THEME_LABELS[_tid])
+            self._theme_ids_by_display[_display] = _tid
+            _theme_values.append(_display)
+        self.theme_menu = ctk.CTkOptionMenu(
+            bottom,
+            values=_theme_values,
+            command=self._on_theme_change,
+            font=Fonts.body(),
+            corner_radius=8,
+            height=34,
+            fg_color=(Colors.BG_LIGHT, Colors.BG_DARK),
+            button_color=("#D6DAE5", "#2A3040"),
+            button_hover_color=("#C3C9D8", "#343B4E"),
+            text_color=(Colors.TEXT_LIGHT, Colors.TEXT_DARK),
+            dropdown_fg_color=(Colors.CARD_LIGHT, Colors.CARD_DARK),
+            dropdown_text_color=(Colors.TEXT_LIGHT, Colors.TEXT_DARK),
+            dropdown_hover_color=(Colors.PRIMARY_SOFT_LIGHT, Colors.PRIMARY_SOFT_DARK),
+        )
+        self.theme_menu.pack(fill=tk.X, padx=2, pady=(0, 12))
+        # 初始值 = 当前已生效主题（__init__ 已按持久化偏好/外观跟随选定）
+        self.theme_menu.set(i18n_module.tr(_THEME_LABELS[self.theme_manager.theme_id]))
+
         # 语言切换：显示名 → 语言码映射；选择即热切换本进程翻译目录并写回 config.ini
         ctk.CTkLabel(
             bottom,
@@ -1506,6 +1920,38 @@ class LiveRecorderGUI:
         mapping = {"跟随系统": "system", "浅色": "light", "深色": "dark"}
         ctk.set_appearance_mode(mapping.get(choice, "system"))
         # 主题切换后同步自绘控件颜色（Canvas 不随主题自动变化）
+        self.root.after(50, self._sync_canvas_bg)
+
+    # 界面主题菜单选择回调（阶段3）：内存态切换 + ttk 注册 + 持久化 + 外观模式同步。
+    # 写回失败只告警不阻断——内存态已切换，与语言菜单的容错口径一致。
+    def _on_theme_change(self, choice: str) -> None:
+        theme_id = self._theme_ids_by_display.get(choice, DEFAULT_THEME)
+        effective = self.theme_manager.select(theme_id)
+        self.theme_manager.apply(self.root)
+        try:
+            if save_theme_preference(self.main_config_file, effective):
+                self._log(i18n_module.tr("界面主题已切换: {theme}", theme=effective))
+            else:
+                self._log(
+                    i18n_module.tr("界面主题已切换为 {theme}，但配置写回失败", theme=effective),
+                    "warn",
+                )
+        except Exception as e:
+            # 写回异常（磁盘/权限）不吞栈：带类型名与原因落日志（裸 {e} 在 Windows 超时类异常下是空串）
+            self._log(
+                i18n_module.tr(
+                    "界面主题已切换为 {theme}，但配置写回失败: {type_name}: {err}",
+                    theme=effective,
+                    type_name=type(e).__name__,
+                    err=e,
+                ),
+                "warn",
+            )
+        # 阶段3 过渡：token 整窗重绘在阶段4 接管，先映射外观模式让 CTk 控件跟随主题明暗
+        ctk_mode = _THEME_CTK_MODE.get(effective, "dark")
+        ctk.set_appearance_mode(ctk_mode)
+        # 外观模式菜单的显示值同步主题归属，避免两个控件显示漂移（该菜单无持久化，阶段4 统一）
+        self.appearance_menu.set({"light": "浅色", "dark": "深色"}.get(ctk_mode, "深色"))
         self.root.after(50, self._sync_canvas_bg)
 
     # 语言菜单选择回调：即时热切换翻译目录并持久化到 config.ini。
@@ -1657,12 +2103,18 @@ class LiveRecorderGUI:
         )
         self.stop_btn.pack(side=tk.LEFT)
 
-        ctk.CTkLabel(
+        # fill+expand 让标签窗口 = 按钮行右侧全部剩余宽（窗口宽由 packer 分配，是自适应换行的前提）；
+        # 窄窗口 / 高 DPI 下放不下时自动折行，不再被 pack 按 anchor=center 两侧对称裁切
+        hint_label = ctk.CTkLabel(
             ctrl_body,
             text="启动后将调用 main.py 循环监测 URL 配置中的直播间并自动录制",
             font=Fonts.small(),
             text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
-        ).pack(side=tk.LEFT, padx=20)
+            anchor=tk.W,
+            justify=tk.LEFT,
+        )
+        hint_label.pack(side=tk.LEFT, padx=20, fill=tk.X, expand=True)
+        _bind_adaptive_wraplength(hint_label)
 
         # ── 快捷操作卡片 ──
         quick_card = self._create_card(page, "快捷操作")
@@ -1871,6 +2323,35 @@ class LiveRecorderGUI:
     # ─── 页面：画质监控 ─────────────────────────────────────
 
     # 构建画质监控页（统计卡片 + 实时详情列表）。
+    # ── 空状态占位工厂（初始构建与每轮刷新重建共用，禁止两处各写一份文案）──
+    # fill=tk.X 让标签窗口 = 滚动区内部宽（packer 分配），配合 _bind_adaptive_wraplength 在
+    # 窄窗口 / 高 DPI 下自动折行——占位文案较长，定宽布局会被 pack 按 anchor=center 两侧裁切。
+
+    def _make_quality_placeholder(self, parent: tk.Misc) -> ctk.CTkLabel:
+        label = ctk.CTkLabel(
+            parent,
+            text="暂无录制中的直播间\n\n启动录制后，将自动检测各直播间的实际画质是否与设置一致",
+            font=Fonts.body(),
+            text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
+            justify=tk.CENTER,
+        )
+        label.pack(fill=tk.X, pady=60)
+        _bind_adaptive_wraplength(label)
+        return label
+
+    def _make_danmaku_placeholder(self, parent: tk.Misc) -> ctk.CTkLabel:
+        label = ctk.CTkLabel(
+            parent,
+            text="暂无弹幕监控数据\n\n启动录制并在 config.ini 开启「是否弹幕监控(是/否)」后，"
+            "支持弹幕的平台（斗鱼/B站/虎牙/抖音/Twitch）将显示实时弹幕",
+            font=Fonts.body(),
+            text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
+            justify=tk.CENTER,
+        )
+        label.pack(fill=tk.X, pady=30)
+        _bind_adaptive_wraplength(label)
+        return label
+
     def _build_quality_page(self, parent: ctk.CTkFrame) -> ctk.CTkFrame:
         page = ctk.CTkFrame(parent, fg_color="transparent")
         page.grid_columnconfigure(0, weight=1)
@@ -1901,7 +2382,9 @@ class LiveRecorderGUI:
         self._quality_scroll = ctk.CTkScrollableFrame(inner, fg_color="transparent")
         self._quality_scroll.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-        ctk.CTkLabel(
+        # 定宽 wraplength=1000 在窄窗口下同样会被 pack 两侧裁切（标签请求宽超出容器分配宽），
+        # 改为绑容器实宽的自适应折行（2026-09-29 修复）
+        quality_hint_label = ctk.CTkLabel(
             inner,
             text="「切换画质」选中非默认画质时，会以「画质,直播间地址」格式写回 config/URL_config.ini，"
             "在下一轮检测循环（默认 120 秒）自动生效；选择「默认画质」则移除该行画质段、回落到全局默认画质。",
@@ -1909,17 +2392,12 @@ class LiveRecorderGUI:
             text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
             anchor=tk.W,
             justify=tk.LEFT,
-            wraplength=1000,
-        ).pack(fill=tk.X, pady=(0, 10))
+        )
+        quality_hint_label.pack(fill=tk.X, pady=(0, 10))
+        _bind_adaptive_wraplength(quality_hint_label)
 
         # 初始空状态
-        ctk.CTkLabel(
-            self._quality_scroll,
-            text="暂无录制中的直播间\n\n启动录制后，将自动检测各直播间的实际画质是否与设置一致",
-            font=Fonts.body(),
-            text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
-            justify=tk.CENTER,
-        ).pack(pady=60)
+        self._make_quality_placeholder(self._quality_scroll)
 
         return page
 
@@ -2137,14 +2615,7 @@ class LiveRecorderGUI:
         self._dm_scroll = ctk.CTkScrollableFrame(inner, fg_color="transparent", height=150)
         self._dm_scroll.pack(fill=tk.BOTH, expand=True)
 
-        ctk.CTkLabel(
-            self._dm_scroll,
-            text="暂无弹幕监控数据\n\n启动录制并在 config.ini 开启「是否弹幕监控(是/否)」后，"
-            "支持弹幕的平台（斗鱼/B站/虎牙/抖音/Twitch）将显示实时弹幕",
-            font=Fonts.body(),
-            text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
-            justify=tk.CENTER,
-        ).pack(pady=30)
+        self._make_danmaku_placeholder(self._dm_scroll)
 
         # 实时弹幕流卡片
         stream_card = self._create_card(page, "📋  实时弹幕")
@@ -2712,6 +3183,9 @@ class LiveRecorderGUI:
     # （_shutdown_and_quit）两条路径共用，消除三处近似实现的行为漂移——
     # 历史上停止路径修过（后台化、会话代号），退出路径不跟随，正是本项要消除的。
     # 返回是否走了优雅信号路径（供日志区分"ffmpeg 已由子进程清理"与"硬杀"）。
+    # [2026-09-29 M-16] 本方法**只允许由 _stop_child_once 调用**（唯一调用点）：控制台附着是
+    # 进程全局状态，单飞闸门与「拿锁后复核 poll()」都在那一层；绕开它直接调本方法就是
+    # 把「停止/退出交叉篡改进程级控制台状态」这个故障重新引入。本方法内部一律不加锁。
     def _send_stop_signal_and_wait(self, proc: subprocess.Popen[str]) -> bool:
         graceful_signal_sent = False
         if sys.platform == "win32":
@@ -2769,6 +3243,56 @@ class LiveRecorderGUI:
                 self._log(f"强制终止失败: {e}")
         return graceful_signal_sent
 
+    # 登记「正在停止子进程」的在途线程（M-16 单飞）。由 stop_recording / quit_application 在
+    # 启动各自工作线程前调用；早于线程内部登记是为了消除「刚点停止、线程还没跑起来」这段
+    # 窗口里的漏判。
+    def _register_stop_worker(self, worker: threading.Thread) -> None:
+        # 已有**在途**（alive）停止线程时不覆盖登记：否则后来者会在 _stop_child_once 里把
+        # 自己认成「在途的那条」，丢掉「复用在途停止线程、等它完成后再收尾」这条语义
+        # （只剩锁兜底，行为仍正确但少了日志与显式复用）。
+        # 已结束却尚未注销的残留登记则直接替换，不会挡住新登记。
+        with self._stop_inflight_lock:
+            current = self._stop_inflight
+            if current is not None and current is not worker and current.is_alive():
+                return
+            self._stop_inflight = worker
+
+    # 注销自己这轮停止（只清自己登记的那条，避免把下一轮的登记抹掉）。
+    def _finish_stop_worker(self) -> None:
+        with self._stop_inflight_lock:
+            if self._stop_inflight is threading.current_thread():
+                self._stop_inflight = None
+
+    # 当前在途的停止线程（None = 没有在途）。
+    def _current_stop_worker(self) -> threading.Thread | None:
+        with self._stop_inflight_lock:
+            worker = self._stop_inflight
+        # is_alive 在锁外判：持锁做线程状态判定没有意义，且退出路径要 join 它，
+        # 绝不能带着 _stop_inflight_lock 去 join（会与登记方形成锁序交叉）。
+        return worker if worker is not None and worker.is_alive() else None
+
+    # M-16：停止子进程的唯一入口——「停止录制」与「彻底退出」两条路径都必须走这里，
+    # 不得再有任何一处直接调 _send_stop_signal_and_wait（grep 判据：全文件仅本方法一个调用点）。
+    def _stop_child_once(self, proc: subprocess.Popen[str]) -> None:
+        # 控制台附着是**进程全局**状态：两个线程对同一 pid 交叉执行
+        # FreeConsole→AttachConsole→GenerateConsoleCtrlEvent→FreeConsole 时，CTRL_BREAK
+        # 可能错投或整个丢失，最坏退化成 taskkill 硬杀——子进程 main.py 的 safe_exit
+        # （清理其下 ffmpeg）就没机会跑，留下孤儿 ffmpeg 继续录制。
+        # 锁的持有层次（AGENTS「要么只内部加锁、要么只由调用方加锁，二选一」）：
+        # **由本方法（调用方）持锁**，被调的 _send_stop_signal_and_wait 内部一律不加锁。
+        worker = self._current_stop_worker()
+        if worker is not None and worker is not threading.current_thread():
+            # 复用正在进行的停止线程：等它跑完再收尾，而不是另起一轮控制台操作。
+            self._log("已有停止流程在途，等待其完成后再收尾（避免并发操作同一子进程控制台）")
+            worker.join(timeout=_STOP_REUSE_JOIN_SECONDS)
+        with self._console_stop_lock:
+            # 拿锁后必须复核进程状态：在途那轮（或另一条路径）可能已经把子进程终止。
+            # 此时再发一遍 CTRL_BREAK，就是对已退出的 pid 走一次 AttachConsole + taskkill，
+            # 除了把「清理成功」的日志刷脏之外没有任何作用。
+            if proc.poll() is not None:
+                return
+            self._send_stop_signal_and_wait(proc)
+
     # 停止录制：发送信号优雅退出，超时则整树强杀 ffmpeg。
     def stop_recording(self) -> None:
         proc = self.process
@@ -2808,7 +3332,10 @@ class LiveRecorderGUI:
             try:
                 # F-07：信号发送/等待/超时强杀核心与退出路径共用 _send_stop_signal_and_wait，
                 # 消除两处近似实现的行为漂移（一处修了另一处漏跟）
-                graceful_signal_sent = self._send_stop_signal_and_wait(proc)
+                # [2026-09-29 M-16] 改走 _stop_child_once：它是两条路径唯一允许触碰子进程
+                # 控制台的入口（内部串行化 + 拿锁后复核 poll()），直接调
+                # _send_stop_signal_and_wait 会绕开单飞闸门。
+                self._stop_child_once(proc)
 
                 # 会话校验：本线程等待期间若已开始新会话，本轮收尾整体作废
                 # （running/process 属于新会话，绝不能被旧回调清空）
@@ -2837,8 +3364,15 @@ class LiveRecorderGUI:
             finally:
                 # 无论收尾成功、跳过（新会话）还是抛异常，「停止流程进行中」都必须结束
                 self._stopping = False
+                # M-16：注销在途标记同样必须无条件——漏掉这一步，后续每次退出都会白等
+                # 一条早已结束线程的 join 预算（_STOP_REUSE_JOIN_SECONDS）。
+                self._finish_stop_worker()
 
-        threading.Thread(target=_wait_and_update_ui, daemon=True).start()
+        worker = threading.Thread(target=_wait_and_update_ui, name="gui-stop-recording", daemon=True)
+        # M-16：登记必须在 start() 之前——否则「点完停止立刻点退出」存在「线程尚未跑起来、
+        # 标记还是 None」的窗口，退出路径就会对同一 pid 再发一遍 CTRL_BREAK。
+        self._register_stop_worker(worker)
+        worker.start()
 
     # 进程终止后在 UI 线程更新按钮状态与状态指示。
     def _on_recording_stopped(self, session_id: int | None = None) -> None:
@@ -2934,8 +3468,61 @@ class LiveRecorderGUI:
 
         flush_batch()
 
+    # after 自续期链的唯一重排入口（M-15）。
+    # Tk 回调一旦抛未捕获异常，写在函数**尾部**的下一次 after 就不会注册，定时链就此永久
+    # 断裂且没有自动恢复路径（用户视角：整页停摆、无日志）。三处周期链一律在 finally 里
+    # 经本方法无条件重排；重排自身失败（窗口已销毁 → TclError）时返回 None 让链自然停住，
+    # 不做 AllocConsole 式的“自救”。与 AdvancedSettingsWindow._watch_config_file 的
+    # finally 重排（MIN-2248 定稿）同型。
+    def _after_retry(self, delay_ms: int, callback: Callable[[], None]) -> str | None:
+        try:
+            return cast(str, self.root.after(delay_ms, callback))
+        except Exception as e:
+            # 只在真失败时留痕：正常停链（_finalize_quit / 队列排空）走调用方的 None 分支。
+            self._log(f"定时任务重排失败（窗口可能已销毁）: {type(e).__name__}: {e}", "warn")
+            return None
+
+    # 周期性回调的异常留痕限频（M-15）：一条链的故障通常是**持续性**的（每 1s / 每 3s 触发
+    # 一次），逐次落日志几十秒就能把日志页刷满、淹掉真实线索；完全静默又让编程错误不可见。
+    # 折中为「同一链名 30s 内最多一条」。仅 UI 线程读写（三条链都是 root.after 回调），不加锁。
+    def _warn_chain(self, chain: str, error: BaseException) -> None:
+        now = time.time()
+        warn_at = getattr(self, "_chain_warn_at", None)
+        if warn_at is None:
+            # 无头桩实例（object.__new__ 跳过 __init__）没有该字典：补一份，不静默吞掉留痕。
+            warn_at = {}
+            self._chain_warn_at = warn_at
+        if now - warn_at.get(chain, 0.0) < self._CHAIN_WARN_INTERVAL_SECONDS:
+            return
+        warn_at[chain] = now
+        self._log(
+            f"{chain}周期任务异常（本轮已跳过、下轮继续；{int(self._CHAIN_WARN_INTERVAL_SECONDS)}s 内不重复）: "
+            f"{type(error).__name__}: {error}",
+            "warn",
+        )
+
     # 定时从日志队列批量刷新消息到日志文本框（UI 线程）。
     def _schedule_log_flush(self) -> None:
+        # M-15：本链此前把「下一次 after」写在函数体最后一句，且 _log_flush_job_id 只在
+        # 该句里更新——渲染中途抛错（log_text 已被销毁、int(index) 解析失败等）时作业 id
+        # 仍是上一轮的旧值（非 None），_pump_ui_events 见它非 None 便认为「已排期」而不再
+        # 激活，日志页从此不再刷新。现主体交给 _drain_log_queue，本方法只负责无条件重排。
+        try:
+            self._drain_log_queue()
+        except Exception as e:
+            self._warn_chain("日志刷新", e)
+        finally:
+            # 「是否继续排期」的判据与改动前逐字保持一致：还有数据才续期，否则置 None
+            # ——None 是这条链的**休眠态**（由 _pump_ui_events / _log 按需唤醒），不是断链。
+            with self._log_queue_lock:
+                has_data = self._log_queue_has_data
+            if has_data or not self._log_queue.empty():
+                self._log_flush_job_id = self._after_retry(self._LOG_FLUSH_INTERVAL, self._schedule_log_flush)
+            else:
+                self._log_flush_job_id = None
+
+    # 取空日志队列、渲染到文本框并处理进程结束哨兵（不排期，排期见 _schedule_log_flush）。
+    def _drain_log_queue(self) -> None:
         messages: list[tuple[str, str]] = []
         process_ended = False
         ended_session_id: int | None = None
@@ -2981,13 +3568,6 @@ class LiveRecorderGUI:
 
         if process_ended:
             self._process_ended(ended_session_id)
-
-        with self._log_queue_lock:
-            has_data = self._log_queue_has_data
-        if has_data or not self._log_queue.empty():
-            self._log_flush_job_id = self.root.after(self._LOG_FLUSH_INTERVAL, self._schedule_log_flush)
-        else:
-            self._log_flush_job_id = None
 
     # 子进程自然结束后的 UI 收尾（重置状态与按钮）。
     def _process_ended(self, session_id: int | None = None) -> None:
@@ -3064,12 +3644,20 @@ class LiveRecorderGUI:
             if dash_idx > 0:
                 msg = line[dash_idx + 3 :]
 
+        patterns = _status_patterns()
+        # M-14 留痕：译稿写坏导致某条模板拼不出可用正则时，语言码变了才重算、才可能出新的
+        # problems，故按「problems 变没变」去重，避免每行日志刷一条。
+        if patterns.problems and getattr(self, "_status_pattern_problems", None) != patterns.problems:
+            self._status_pattern_problems = patterns.problems
+            for problem in patterns.problems:
+                self._log(f"画质监控状态行解析降级: {problem}", "warn")
+
         # 画质降级告警："{name} 画质降级：设置 {zh}({code}) 实际 {zh}({code})"
-        m = self.QUALITY_DOWNGRADE_PATTERN.search(msg)
+        m = patterns.downgrade.search(msg) if patterns.downgrade is not None else None
         if m:
-            name = m.group(1).strip()
-            set_zh, set_code = m.group(2), m.group(3)
-            actual_zh, actual_code = m.group(4), m.group(5)
+            name = m.group("record_name").strip()
+            set_zh, set_code = m.group("record_quality_zh"), m.group("record_quality")
+            actual_zh, actual_code = m.group("actual_quality_zh"), m.group("actual_quality_code")
             with self._quality_lock:
                 info = self._quality_data.setdefault(name, {})
                 info.update(
@@ -3090,10 +3678,10 @@ class LiveRecorderGUI:
             return
 
         # 录制中行："{name}[{quality}] 正在录制中 {duration}"
-        m = self.RECORDING_LINE_PATTERN.match(msg)
+        m = patterns.recording.match(msg) if patterns.recording is not None else None
         if m:
-            name = m.group(1).strip()
-            quality = m.group(2).strip()
+            name = m.group("recording_live").strip()
+            quality = m.group("qa").strip()
             now = time.time()
             with self._quality_lock:
                 info = self._quality_data.setdefault(name, {})
@@ -3114,10 +3702,16 @@ class LiveRecorderGUI:
             return
 
         # "没有正在录制" → 清除所有录制标记
-        if "没有正在录制" in msg or "没有正在监测和录制的直播" in msg:
-            with self._quality_lock:
-                for info in self._quality_data.values():
-                    info["recording"] = False
+        # [2026-09-29 M-14] 原为 `"没有正在录制" in msg or "没有正在监测和录制的直播" in msg`
+        # ——裸简中子串，非中文界面下空态永不生效（房间停止录制后画质页仍显示「录制中」）。
+        # 现子串表由 tr() 结果 + 原文两种形态组成（_idle_needles；原文那一份的必要性见
+        # _STATUS_TPL_EMPTY 注释：该串生产侧未过 tr()，能否被翻译取决于 builtins.print 补丁）。
+        for needle in patterns.idle_needles:
+            if needle and needle in msg:
+                with self._quality_lock:
+                    for info in self._quality_data.values():
+                        info["recording"] = False
+                break
 
     # 在 UI 线程刷新画质监控页面与统计（仅限录制中的项）。
     def _update_quality_display(self) -> None:
@@ -3148,13 +3742,7 @@ class LiveRecorderGUI:
             widget.destroy()
 
         if not data:
-            ctk.CTkLabel(
-                self._quality_scroll,
-                text="暂无录制中的直播间\n\n启动录制后，将自动检测各直播间的实际画质是否与设置一致",
-                font=Fonts.body(),
-                text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
-                justify=tk.CENTER,
-            ).pack(pady=60)
+            self._make_quality_placeholder(self._quality_scroll)
         else:
             # 表头 + 数据行
             self._add_quality_header_row()
@@ -3230,6 +3818,8 @@ class LiveRecorderGUI:
         offset = 0
         partial = ""
         first_open = True
+        # M-17：最外层异常留痕的限频时刻（线程局部，无需加锁，也天然按轮次重置）。
+        last_warn_at = 0.0
         while not stop_event.is_set():
             try:
                 if not os.path.exists(path):
@@ -3260,6 +3850,8 @@ class LiveRecorderGUI:
                 partial += chunk.decode("utf-8", errors="replace")
                 lines = partial.split("\n")
                 partial = lines.pop()
+                bad_events = 0
+                bad_detail = ""
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -3269,14 +3861,39 @@ class LiveRecorderGUI:
                     except ValueError, TypeError:
                         continue
                     if isinstance(event, dict):
-                        self._danmaku_dispatch(event)
+                        # M-17：防护必须落在**每条事件**上。此前 _danmaku_dispatch 里一条脏
+                        # 事件（如数值字段为 null）冒泡到本函数最外层 except，而此时 offset
+                        # 已经推进过整个 chunk —— 同批后续完好事件全部丢失、且零日志，
+                        # 用户视角就是「弹幕页凭空少了一段」。坏条只废自己、继续读下一条。
+                        try:
+                            self._danmaku_dispatch(event)
+                        except Exception as e:
+                            bad_events += 1
+                            if not bad_detail:
+                                # Windows 下 socket.timeout/TimeoutError 的 str() 是空串，
+                                # 故带异常类型名（AGENTS「异常日志必须带类型」口径）。
+                                bad_detail = f"{type(e).__name__}: {e}"
+                if bad_events:
+                    self._log(f"弹幕事件处理失败 {bad_events} 条已跳过（同批其余事件不受影响）: {bad_detail}", "warn")
             except OSError:
+                # 日志被归档改名 / 句柄未就绪（MID-2250 已知良性路径）：等一轮再试，不刷屏。
                 time.sleep(1.0)
-            except Exception:
+            except Exception as e:
+                # M-17：此前是完全静默的 sleep —— tail 线程每轮都抛同一个错时，界面表现为
+                # 「弹幕监控长期不更新」而日志里一条线索都没有。限频 30s 留痕后继续循环，
+                # 不 break（本线程的退出信号只有 stop_event，见 MID-2250）。
+                now = time.time()
+                if now - last_warn_at >= self._CHAIN_WARN_INTERVAL_SECONDS:
+                    last_warn_at = now
+                    self._log(f"弹幕 tail 线程本轮异常（下轮继续）: {type(e).__name__}: {e}", "warn")
                 time.sleep(1.0)
 
     # 分发一条 JSONL 事件到线程安全缓冲（tail 线程调用，只写锁内数据、不触碰 Tk）。
     # conn 事件维护房间连接状态；stats 事件为统计权威来源；msg 事件进入弹幕流缓冲。
+    # 数值字段一律经 _as_float/_as_int（M-15/M-17 的单一容错口径）：本函数读的是外部可控
+    # 的边车 JSONL，且 tail 首读会回放旧文件末尾 64KB 的历史脏记录，null/字符串都可达；
+    # 此前裸 float(event.get("ts", 0.0)) 遇 null 抛 TypeError（文件头 2026-09-12 审查 6.2
+    # 已记过一次），一条脏事件能带走整批。
     def _danmaku_dispatch(self, event: dict[str, Any]) -> None:
         ev = str(event.get("ev", ""))
         room = str(event.get("room", ""))
@@ -3287,7 +3904,7 @@ class LiveRecorderGUI:
                     self._danmaku_rooms[room] = {
                         "platform": str(event.get("platform", "—")),
                         "connected": False,
-                        "started_at": float(event.get("ts", 0.0)),
+                        "started_at": _as_float(event.get("ts")),
                         "msg_total": 0,
                         "msg_rate": 0,
                         "gift_total": 0,
@@ -3321,17 +3938,25 @@ class LiveRecorderGUI:
                 )
                 info["platform"] = str(event.get("platform", info.get("platform", "—")))
                 info["connected"] = bool(event.get("connected", False))
-                info["msg_total"] = int(event.get("msg_total", info.get("msg_total", 0)))
-                info["msg_rate"] = int(event.get("msg_rate", info.get("msg_rate", 0)))
-                info["gift_total"] = int(event.get("gift_total", info.get("gift_total", 0)))
-                info["online"] = int(event.get("online", info.get("online", 0)))
+                info["msg_total"] = _as_int(event.get("msg_total", info.get("msg_total", 0)))
+                info["msg_rate"] = _as_int(event.get("msg_rate", info.get("msg_rate", 0)))
+                info["gift_total"] = _as_int(event.get("gift_total", info.get("gift_total", 0)))
+                info["online"] = _as_int(event.get("online", info.get("online", 0)))
                 self._danmaku_stats_dirty = True
 
     # 每秒刷新弹幕监控页（UI 线程）：统计表按脏标记重建，弹幕流按脏标记重绘。
     def _schedule_danmaku_refresh(self) -> None:
-        self._update_danmaku_display()
-        self._render_danmaku_stream()
-        self._danmaku_refresh_job_id = self.root.after(1000, self._schedule_danmaku_refresh)
+        # M-15：续期注册必须落 finally。本链的两个渲染函数都在动 Tk 控件，且
+        # _render_danmaku_stream 里的时间戳字段来自外部 JSONL（历史脏记录可达）——
+        # 原写法一旦抛错就跳过最后一句 after，弹幕监控页**永久**停止刷新且无任何日志
+        # （文件头 2026-09-12 审查 6.2 记过的 float(None) 正是这条触发源）。
+        try:
+            self._update_danmaku_display()
+            self._render_danmaku_stream()
+        except Exception as e:
+            self._warn_chain("弹幕监控刷新", e)
+        finally:
+            self._danmaku_refresh_job_id = self._after_retry(1000, self._schedule_danmaku_refresh)
 
     # 在 UI 线程重建弹幕房间统计表与顶部统计（数据未变化时跳过，避免闪烁）。
     def _update_danmaku_display(self) -> None:
@@ -3347,20 +3972,23 @@ class LiveRecorderGUI:
         total_msgs = 0
         connected_count = 0
         for name, info in rooms_snapshot.items():
-            started_ts = float(info.get("started_at", 0.0))
+            # M-15：数值字段统一走 _as_float/_as_int。started_at 由 _danmaku_dispatch 写入，
+            # 但 _danmaku_rooms 也可能被旧版本/外部数据污染，这里再兜一道（同一 helper，
+            # 不在本文件里出现第二套容错写法）。
+            started_ts = _as_float(info.get("started_at", 0.0))
             rows.append(
                 {
                     "room": name,
                     "platform": str(info.get("platform", "—")),
                     "connected": bool(info.get("connected")),
-                    "msg_total": int(info.get("msg_total", 0)),
-                    "msg_rate": int(info.get("msg_rate", 0)),
-                    "gift_total": int(info.get("gift_total", 0)),
-                    "online": int(info.get("online", 0)),
+                    "msg_total": _as_int(info.get("msg_total", 0)),
+                    "msg_rate": _as_int(info.get("msg_rate", 0)),
+                    "gift_total": _as_int(info.get("gift_total", 0)),
+                    "online": _as_int(info.get("online", 0)),
                     "started_at": time.strftime("%H:%M:%S", time.localtime(started_ts)) if started_ts else "—",
                 }
             )
-            total_msgs += int(info.get("msg_total", 0))
+            total_msgs += _as_int(info.get("msg_total", 0))
             if bool(info.get("connected")):
                 connected_count += 1
 
@@ -3372,14 +4000,7 @@ class LiveRecorderGUI:
             widget.destroy()
 
         if not rows:
-            ctk.CTkLabel(
-                self._dm_scroll,
-                text="暂无弹幕监控数据\n\n启动录制并在 config.ini 开启「是否弹幕监控(是/否)」后，"
-                "支持弹幕的平台（斗鱼/B站/虎牙/抖音/Twitch）将显示实时弹幕",
-                font=Fonts.body(),
-                text_color=(Colors.MUTED_LIGHT, Colors.MUTED_DARK),
-                justify=tk.CENTER,
-            ).pack(pady=30)
+            self._make_danmaku_placeholder(self._dm_scroll)
         else:
             self._add_danmaku_header_row()
             for row in sorted(rows, key=lambda r: str(r["room"])):
@@ -3430,7 +4051,9 @@ class LiveRecorderGUI:
             if filter_value != "全部房间" and room != filter_value:
                 continue
             mtype = str(m.get("type", "chat"))
-            ts = float(m.get("ts", 0.0))
+            # M-15 的确切触发点：ts 为 null / 非数值时裸 float 抛 TypeError，整条 after 链
+            # 就此断掉（文件头 2026-09-12 审查 6.2 已记过一次）。回落 0.0 → 显示 --:--:--。
+            ts = _as_float(m.get("ts", 0.0))
             tstr = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "--:--:--"
             user = str(m.get("user", ""))
             text = str(m.get("text", ""))
@@ -3484,11 +4107,19 @@ class LiveRecorderGUI:
 
     # 周期性刷新状态栏、画质显示并监控 URL 配置变化。
     def _schedule_status_refresh(self) -> None:
-        self._update_status_bar()
-        self._update_quality_display()
-        self._watch_url_config()
-        interval = self._STATUS_REFRESH_INTERVAL_ACTIVE if self.running else self._STATUS_REFRESH_INTERVAL
-        self._refresh_job_id = self.root.after(interval, self._schedule_status_refresh)
+        # M-15：与弹幕刷新链同型——续期原先落在函数最后一句，_update_quality_display 的
+        # 控件 destroy/重建（窗口销毁竞态下的 TclError）或 _watch_url_config 里 messagebox
+        # 的异常都会让本链静默断掉：状态灯停摆、画质页不再刷新、URL 配置外部改动不再自动
+        # 重载，且 _refresh_job_id 仍留着旧 id 使没有任何人会重新排期。
+        try:
+            self._update_status_bar()
+            self._update_quality_display()
+            self._watch_url_config()
+        except Exception as e:
+            self._warn_chain("状态刷新", e)
+        finally:
+            interval = self._STATUS_REFRESH_INTERVAL_ACTIVE if self.running else self._STATUS_REFRESH_INTERVAL
+            self._refresh_job_id = self._after_retry(interval, self._schedule_status_refresh)
 
     # 监控 URL_config.ini 的修改时间，变化时自动重载。
     def _watch_url_config(self) -> None:
@@ -3560,7 +4191,11 @@ class LiveRecorderGUI:
         self._log("正在停止录制并清理 ffmpeg 进程，请稍候...")
         # 在后台线程完成「停止录制 + 清理残留 ffmpeg」，完成后再回主线程销毁窗口，
         # 避免窗口先被 destroy 导致清理线程被强杀、ffmpeg 残留。
-        threading.Thread(target=self._shutdown_and_quit, daemon=True).start()
+        quit_worker = threading.Thread(target=self._shutdown_and_quit, name="gui-quit", daemon=True)
+        # M-16：退出链同样登记为「在途停止线程」，与 stop_recording 对称——
+        # 谁先到谁登记，另一条路径就能在 _stop_child_once 里看见它。
+        self._register_stop_worker(quit_worker)
+        quit_worker.start()
 
     # 后台执行：优雅停止录制子进程并按需整树强杀与清理 ffmpeg。
     def _shutdown_and_quit(self) -> None:
@@ -3571,11 +4206,14 @@ class LiveRecorderGUI:
         #
         # F-07：信号/等待/强杀核心已抽到 _send_stop_signal_and_wait，与停止录制
         # 路径共用（原为本函数内的独立实现，行为随时间漂移）。
+        # [2026-09-29 M-16] 两条路径现在共用的是**单飞入口** _stop_child_once：
+        # 「停止录制」在途时退出会先复用它（join 完成后收尾），拿锁后再复核 proc.poll()，
+        # 因此不存在「两个线程交叉操作同一子进程控制台」的形态。
         proc = self.process
         child_pid = proc.pid if proc is not None else None
         try:
             if proc is not None:
-                _ = self._send_stop_signal_and_wait(proc)
+                self._stop_child_once(proc)
 
                 # 退出流程无 session_id 概念（本函数在应用关闭时调用，不存在「新会话」），
                 # 传 None 走无条件置位分支，与收敛前的行为一致
@@ -3589,6 +4227,10 @@ class LiveRecorderGUI:
         except Exception as e:
             # 任何异常都不能阻断 UI 收尾，否则窗口无法销毁、进程无法退出
             self._log(f"退出清理流程异常: {e}", "warn")
+        finally:
+            # M-16：注销本轮登记（只清自己那条，见 _finish_stop_worker）。不注销会让
+            # 后续任何停止/退出都白等一次 _STOP_REUSE_JOIN_SECONDS 的 join 预算。
+            self._finish_stop_worker()
 
         # 通过事件泵路由回 UI 线程收尾销毁（禁止直接跨线程调用 root.after）
         self.post_ui(self._finalize_quit)

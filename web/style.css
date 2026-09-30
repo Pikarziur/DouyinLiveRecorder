@@ -504,3 +504,97 @@ button.small { background: var(--primary-soft); color: var(--primary); border: n
     font-weight: 600;
     line-height: 1.5;
 }
+
+/* ===== 认证复验口令窗（M-22，2026-09-29） =====
+   面板原先用 window.prompt 采集复验口令（明文回显，是全站唯一非 type="password" 的口令输入形态），
+   现改成本文件既有形态：静态节点 + .hidden 切换（与 .login-card / .engine-warning 同族，
+   不引框架、不在运行时 createElement —— 后者会让 tests/frontend/*.mjs 的 node:vm 沙箱无法驱动）。
+   层级：.modal-overlay 的 z-index 必须**高于** .toast 的 1000，保存失败/403 的 toast 才不会被
+   口令窗盖住而看不见（反之若口令窗压在 toast 之下，用户会在提示下面看不清正在发生什么）。
+   配色一律取既有变量（--card/--border/--text/--muted/--bg/--primary），不新增颜色字面量；
+   遮罩底色与 .toast 的投影同为 rgba 中性黑，与明暗两套主题都不冲突。
+   取消按钮走 #reauth-cancel 单独配色，**不要**写 .modal-actions button 的 background：
+   .modal-actions button(0,1,1) 的特异性高于 .primary(0,1,0)，会把主按钮刷成灰底。 */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* 安全区：横屏刘海机型会把居中卡片往左侧挤，padding 让出 env(safe-area-inset-*) */
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+        max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    background: rgba(15, 17, 23, 0.55);
+    z-index: 1100;
+}
+.modal-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 420px;
+    padding: 18px 20px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+.modal-card label { color: var(--text); font-size: 13px; line-height: 1.6; }
+.modal-card input {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.modal-actions button {
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+}
+#reauth-cancel { border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+#reauth-cancel:hover { border-color: var(--primary); color: var(--primary); }
+
+/* ===== 动效层（web/motion.js 配套，零依赖） =====
+   - 滚动入场：.reveal 初始隐藏，进入视口加 .is-revealed 过渡显现；无 JS 时元素默认可见
+     （opacity:0 只在 .reveal 被 JS 加上后才生效，脚本失败/禁用也不丢内容）。
+   - 轻量粒子背景：#bg-canvas 固定层，z-index:-1 落在 body 背景之上、主内容之下；卡片不透明盖住
+     粒子，仅在缝隙与留白处透出，保证「克制」而非喧宾夺主。
+   - 统一交互反馈只动 background-color/color/border-color/box-shadow/transform/opacity，绝不触发布局属性
+     （避免 layout thrash）；:focus-visible 兜底键盘可达的焦点环。
+   - 可访问性闸门：prefers-reduced-motion 命中时入场过渡与时长归零、悬浮位移关闭（canvas 由 motion.js 跳过创建）。 */
+#bg-canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: -1;
+    pointer-events: none;
+}
+.reveal { opacity: 0; transform: translateY(12px); }
+.is-revealed {
+    opacity: 1;
+    transform: none;
+    transition: opacity 0.5s ease, transform 0.5s ease;
+}
+.tab, .topbar-right button, .topbar-right select,
+.inline-form button, .primary, button.small, button.danger,
+.recording-control button, .quality-chip button, .login-card button,
+.stat-card, .panel {
+    transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease,
+        box-shadow 0.18s ease, transform 0.18s ease;
+}
+.stat-card:hover, .panel:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+}
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; }
+    .is-revealed { transition: none; }
+    .stat-card:hover, .panel:hover { transform: none; box-shadow: none; }
+    * { scroll-behavior: auto !important; }
+}

@@ -4,10 +4,23 @@
 
 import os
 import sys
+import types
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
+
+
+def _os_shim(**overrides: Any) -> types.SimpleNamespace:
+    # M-27（CODE_REVIEW_2026-09-29_2）：`monkeypatch.setattr(os, "rename", 替身)` 解析到的是全进程
+    # 唯一的 os 模块本体，替身窗口内 loguru 轮转、弹幕边车、其他录制/转码线程的改名会一并被换掉。
+    # 按仓库约定（AGENTS「测试编写强制约定」/ tests/test_test_hygiene.py R1 的正确写法）：浅拷贝命名
+    # 空间 + 只覆盖需要的那一个属性，再把替身绑到**被测模块（main）自己的 os 引用**上。
+    shim = types.SimpleNamespace(**vars(os))
+    for name, value in overrides.items():
+        setattr(shim, name, value)
+    return shim
 
 
 @pytest.fixture(scope="module")
@@ -251,7 +264,10 @@ class TestRenameAnchorDirectory:
                 raise OSError(13, "Permission denied")
             return real_rename(src, dst)
 
-        monkeypatch.setattr(os, "rename", selective_rename)
+        monkeypatch.setattr(main_mod, "os", _os_shim(rename=selective_rename))
+        # M-27 回归锁：替身只落进 main 的命名空间；进程全局 os.rename 必须仍是真实现
+        # （恢复成 `setattr(os, "rename", ...)` 时这一行当场变红）。
+        assert os.rename is real_rename
 
         assert main_mod.rename_anchor_directory("旧名字", "新名字", "抖音直播") is True
         new_dir = save_root / "抖音直播" / "新名字"
@@ -272,7 +288,10 @@ class TestRenameAnchorDirectory:
         def fail_dir_rename(src: str, dst: str) -> None:
             raise OSError(5, "Access is denied")
 
-        monkeypatch.setattr(os, "rename", fail_dir_rename)
+        real_rename = os.rename
+        monkeypatch.setattr(main_mod, "os", _os_shim(rename=fail_dir_rename))
+        # M-27 回归锁：目录级失败只在 main 的命名空间里生效，进程全局 os.rename 不受波及
+        assert os.rename is real_rename
 
         assert main_mod.rename_anchor_directory("旧名字", "新名字", "抖音直播") is False
         assert anchor_dir.is_dir()  # 原目录原样保留

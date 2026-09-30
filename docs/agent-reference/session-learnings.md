@@ -133,3 +133,56 @@ Qoder CN 发行版的实际数据根（`.qoder-cn`）不一致，属外部工具
 - 2026-09-27 | 根约定文件减不动：先证明它是约束密度下限，再谈架构 | `AGENTS.md` 精简一轮只有 −1.4%（97,034→95,715 B），原因可量化：224 条顶层条目平均 383 B，逐条都是「判据+常量名+用例名+错误码」。可用的只有三类：① 已在 `docs/agent-reference/measured-evidence.md` 留存的读数被根文件又抄了一遍（BtbN/johnvansickle 三个字节数、月末标签回溯、`assets[].digest`）；② 真正的第二事实源（「关键约定」14 与 i18n 提取器盲区条目、「项目概览」版本行与「关键约定」1、风险控制路由句与两处细则）；③ 同因两条（`PYTHONUTF8` 父进程转发 与 `reconfigure(errors=...)`）。判据：**减体积前先跑 token 保全审计**（原文全部 code span / `test_` 名 / CVE-PYSEC-GHSA-MIN-SEV-MID 编号 / `UPPER_SNAKE` 名逐一在新文件与外迁目标里找），丢失数必须为 0 才算「没删掉约束」。要再降一档只能改架构（已知坑按主题外迁、根文件留索引+硬规则），而那与该文件开头「约束句一律留在本文件内」的自我约定冲突，属用户决策。 | `AGENTS.md`「可达性约定」
 - 2026-09-27 | egg-info 里藏着依赖规格的**第二副本**，改下限必须一并重建 | `requirements.txt`/`pyproject` 抬 `h2` 下限到 4.4.1 之后，`DouyinLiveRecorder.egg-info/requires.txt` 已同步（它由安装动作刷新），但 `PKG-INFO` 的 `Requires-Dist:` 头仍停在 `h2>=4.3.0`，且 PKG-INFO 内嵌的 README 缺整段 v4.3.0 更新日志。任何走 `importlib.metadata.requires(...)`/`metadata` 的读取都会拿到旧下限，而这条**没有任何门禁覆盖**（`check_version.py` 只管版本号，`deps-audit` 只读 requirements.txt）。判据：改 `pyproject.toml` 依赖或 README 版本段之后，除了 `setup.py egg_info` 重建，还要用「重建前后逐文件 diff」确认漂移字段（本次实测：4 个文件逐字节不变、PKG-INFO 变 2 处）；对账必须按 AGENTS 的「剥行内注释 + 包名与规格集合」口径，`protobuf<8,>=6.33.5` 与 `>=6.33.5,<8` 的顺序差不是差异。 | `DouyinLiveRecorder.egg-info/PKG-INFO`、`AGENTS.md` 依赖对账条目
 - 2026-09-27 | 一致性同步的正确形态是「改真漂移 + 记录已核对无漂移」 | 用户要求把 15 个文件统一到最新状态。实测下来只有 3 处真漂移：① `AGENTS.md` 仍写 `protobuf>=6.31.1,<8`（下限 09-26 已抬）；② egg-info 的两处 PKG-INFO 字段；③ 文档统计节无可复算命令的 285。其余（23↔23 依赖集合、Dockerfile ARG 行序、compose pull_policy、`python 3.14`/`node 24` 跨 workflow、四套排除清单、config.ini 6 节 143 键、四语 780 键集与 .mo 同步）全部**经核对确认无需更新**。判据：**「没改」也要写成带判据的条目**（调用点计数、集合相等、门禁 rc），否则下一轮又会把同一批文件重审一遍；`build_exe.py` 内 `read_config_value` 调用数 = 0 这类计数，正是「本轮不需要动 config.ini」的证据。 | `CODE_WIKI.md` 本日总览条目第七小节
+
+## 2026-09-29 — 阶段2/3（Starlette 迁移 + GUI 主题层）
+
+- 仅静态验证（py_compile/grep/AST）证明不了框架迁移正确性：Starlette 无 `@app.middleware("http")`
+  装饰器方法（导入即崩）、内建 HTTPException handler 回纯文本（丢 `{"detail": ...}` 契约）都是
+  TestClient 真跑才暴露。框架/库迁移类改动必须先补最小运行期冒烟再谈完成。
+- i18n 四目录手工补串时，JSON 按行重排会把「收尾行无逗号」排进中间造成非法 JSON；安全做法是尾部
+  追加 + 修前一行逗号 + 写前 `json.loads` 自证。`resolve_language(en_GB)` 悄悄回退 en_US 是该损坏
+  的首个可见症状。
+- `scripts/extract_i18n_strings.py` 扫不到「字典值经变量传入 tr()」的文案（如 `_THEME_LABELS` 的
+  主题显示名）——提取器报告「0 缺失」不等于无缺失，这类串要手工补四目录并在 worklog 记录盲区。
+- tests/test_test_hygiene.py 是元测试（438 例），按仓库测试文件/函数动态生成；全量 pytest 数与
+  预期差几条先想到它，不是回归。
+
+- CTk 真窗测试禁用 set_widget_scaling 手动覆盖：它与系统 DPI 追踪在窗口映射时互相触发全量重缩放
+  事件风暴（update() 永不返回）。验证 DPI 换算一律走系统自身缩放 + 纯函数锚点锁。
+- 「两侧对称缺字」是 Tk pack 放不下子件的指纹（默认 anchor=center 居中后两侧等量裁切）；
+  只缺一侧则是 anchor=W 的右缘裁切（定宽 wraplength 超容器）。修复统一走「fill=tk.X + 绑定
+  自身窗口宽的自适应 wraplength」，绑定时必须先按当前宽设初值（重 pack 几何不变不触发 Configure）。
+- **并行工作包的「实现完成」与「门禁完成」是两件事**：子代理常在 150 轮上限处中断于收尾验证（black/mypy/
+  注释密度），实现却已落地。主控接手时的正确顺序是：`compileall` 判存活 → `run_gates.py --keep-going` 取
+  权威红项 → 按「红项归属文件」定位缺口，而不是重跑整包或怀疑实现被写坏。
+- **并行修复的 i18n 中间态必须中央合并后再宣布完成**：`_i18n_pending*.json` 只是防撞口袋。合并要四目录
+  同批（`.po` + 两份 `.json` + `.yaml`）→ 重编 `.mo` → `extract_i18n_strings.py` 报「缺失 0 条」→ 删中间态。
+  只做其中一步会得到「代码有 tr 串、目录没有」的假绿（`test_runtime_templates_covered_by_catalog` 会红）。
+- **ci.yml 的前端 node-id 清单是「第二道防线」，新增 `.mjs`/`.py` 包装必须同批登记**：`node --test <文件>`
+  只跑被点名的文件、不会发现同级其他 `.mjs`；包装写了但不进清单 = 该文件全部锁在 CI 中从不执行。
+- **并发窗口里的子进程用例结论不可信**：harness 句柄限制会造出 `OSError [WinError 50]/[WinError 6]`，
+  表现是「全量 14 红、安静单批复跑 54 绿」。裁定回归前必须在没有其他子代理跑测试时复跑同一批文件。
+- **Bash heredoc 会折叠反斜杠并截断超长载荷**：Python 内的 CR 转义变成真 CR 字节（污染文档且引入裸 CR）、
+  字符类里的双反斜杠被折成单反斜杠，使正则报「unterminated character set」；超长载荷块报 unexpected EOF。含反斜杠或密集
+  引号的落盘内容一律走 Edit 工具（JSON 通道无损），或现场用 chr() 构造；写仓库外脚本会被分类器拦，
+  「优先不落盘」在本仓是硬要求。判据：改文本文件后立刻核对 `crlf / lf_only / 裸 CR` 三个读数。
+
+- **变异验证的残留对静态门禁完全隐形，只有行为用例能抓**：2026-09-30 一个并行工作包撞轮次上限，把
+  `src/stream_select.py` 分片探测分支的 `raise` 留在变异态（`pass` + 一条带标记注释）。该形态语法合法、
+  mypy 不报错、注释密度反而上升，black/isort/mypy/check_annotations 四条门禁全绿；真正抓到它的是**同批新写的
+  那条行为用例**（断言末位候选在内网目标上必须回 False，拿到 True）。附带后果是安全级的：`seg_resp` 未赋值 →
+  `UnboundLocalError` 被外层 `except Exception` 当探测异常吞掉 → 内网地址被交给 ffmpeg。因此：
+  ① 变异改动行必须带统一标记，收尾由门禁扫标记（本仓落为 `tests/test_test_hygiene.py` 的 R8）；
+  ② 接手被中断的工作包时，第一动作是 `grep` 标记 + `compileall` + 门禁，而不是读它的自述判断完成度；
+  ③ 优先「内存备份 → 改写 → 跑 → `finally` 按字节还原」单进程手法（本仓 harness 分类器也会拦「改坏生产代码」）。
+- **判定「全量红是噪声还是回归」用计数对齐，而不是凭印象**：同一 `pytest -q` 连跑四次得到 21 failed / 12 failed /
+  全绿 / 全绿。把失败条数与 `OSError: [WinError 6] 句柄无效` 的出现次数对齐（12 ↔ 12，栈全在
+  `subprocess.Popen._make_inheritable`），再按文件聚类（全属真起子进程的文件），最后把那批文件单独跑一次全绿 ——
+  三步齐了才敢说环境噪声。同时确认该形态**早于本批存在**（会话第一次全量就有同族红），避免把既有现象归因给新改动。
+- **批量重写文本文件必须自证「只删了空行、没删内容」**：一次「过滤空行后重拼」的批量写入吃掉了 8 个段内空行和
+  `import pytest` 前的分组空行（isort 立刻报 Imports are incorrectly sorted —— 这是它替我抓到的信号）。
+  核对方法：`git diff` 的删除行数 + 逐行比对 HEAD 的非空行是否全部仍在（结果 9 删/1 行是有意更正、其余为空行）。
+  教训：改文档或大文件只用定点替换，不要「读全量→过滤→重写」。
+- **往文档写「本批新增/修复了 X」之前先 `git show HEAD:<file>` 核对**：我把 collector 既有的 `status: SKIP` +
+  `reason: room_offline` 行为写成了本批新增，`git diff` 里根本没有该 hunk。归因错误比缺文档更贵，因为它会把
+  后来者的排查方向带偏。

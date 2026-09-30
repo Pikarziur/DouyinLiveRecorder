@@ -30,8 +30,58 @@ from .logger import logger
 # 禁用代理的处理器（本地请求不使用代理）
 no_proxy_handler = urllib.request.ProxyHandler({})
 
+# ── M-2（2026-09-29 审查 WP-B）：opener 的 handler 集合按「协议白名单」显式构造 ──────────
+# 原先两支预构建 opener 都走 urllib.request.build_opener()，而它的默认 handler 集合里固定带着
+# FileHandler / FTPHandler / DataHandler（CPython 3.14 urllib.request.build_opener 的
+# default_classes 列表），于是：
+#   ① 直连路径 sync_req("file:///etc/passwd") 会把本地文件当响应体原样返回——FileHandler 走的
+#      就是内置 open()，与网络层毫无关系；
+#   ② 更要命的是**跨 scheme 跳转**：HTTPRedirectHandler 把 Location 重新交给**同一个 opener**
+#      处理，所以「公网地址先过入口白名单 → 302 到 file://…」一样能被读出来。入口那一道
+#      （utils.is_safe_http_url）只看最初的 URL，看不见落地地址。
+# 现在只显式注册 http/https 两类协议 handler + 重定向 + 错误处理 + UnknownHandler 兜底，
+# **不再注册** file/ftp/data。协议无 handler 时 urllib 落到 UnknownHandler.unknown_open，抛
+# URLError('unknown url type: …')，响应体一步都不读。选「显式白名单」而不是「build_opener 后
+# remove_handler_by_class 摘掉」的两条理由：
+#   · 摘除法只挡得住我点名摘的那三类；CPython 将来往默认集合里加任何新协议，都会自动进到本仓
+#     的出站面上——白名单形态下「新增协议」必须是显式改动。
+#   · OpenerDirector.remove_handler_by_class / .handlers 都不在 typeshed 声明里，得靠 cast+getattr
+#     绕静态检查（AGENTS「三参 getattr 不做字面量名解析」那条同族风险）。
+# UnknownHandler **必须保留**：它就是「白名单外协议」的统一拒绝口，摘掉它 urllib 会改抛
+# 「unknown url type」以外的形态，失败语义反而漂移。
+# 残余缺口（登记，不在本层闭合）：abroad=True 分支用的是 urllib.request.urlopen，即**进程全局
+# 默认 opener**（仍带 FileHandler）；把它也换成本模块的白名单 opener，会连带换掉
+# tests/test_sync_http.py 对 urlopen 的 patch 目标（AGENTS 硬约束），故该分支改为「事后核对落地
+# URL」——文件已被读出但绝不外流，见 _reject_unsafe_scheme 的注释与该分支的调用点。
+_HTTP_ONLY_HANDLERS: tuple[type[urllib.request.BaseHandler], ...] = (
+    urllib.request.UnknownHandler,
+    urllib.request.HTTPHandler,
+    urllib.request.HTTPDefaultErrorHandler,
+    urllib.request.HTTPRedirectHandler,
+    urllib.request.HTTPErrorProcessor,
+)
+
+
+def _http_only_opener(https_handler: urllib.request.HTTPSHandler) -> urllib.request.OpenerDirector:
+    # 按上面的白名单组装一支 opener：先 ProxyHandler({})（本地请求不走系统代理），再逐条 add_handler，
+    # 最后带上调用方给的 HTTPSHandler。
+    # HTTPSHandler 之所以是**必填实参**而不是白名单里的一条：两支 opener 的唯一差异就是它挂的
+    # SSLContext（安全支默认 context / 降级支 CERT_NONE），而 OpenerDirector.add_handler 是
+    # 「追加」不是「替换」——把它放进默认列表再补一支，opener 上就会出现两支 HTTPSHandler，
+    # 由 handler_order 相同的两支按插入顺序竞争，降级语义可能被默认那支吃掉（实测会被
+    # tests/test_sync_http.py::_opener_https_context 的「恰好一支」断言抓红）。必填实参把
+    # 「只能有一支」变成构造层面的保证。
+    # urllib 按 BaseHandler.handler_order 排序插入，其余顺序与 build_opener 的默认集合等价，
+    # 差别只有「非 http/https 协议一律不注册」这一条。
+    opener = urllib.request.OpenerDirector()
+    for handler in (no_proxy_handler, *(klass() for klass in _HTTP_ONLY_HANDLERS), https_handler):
+        opener.add_handler(handler)
+    return opener
+
+
 # 预构建 opener：仅禁用代理，保留默认证书验证（ssl_verify=True 时使用）
-_opener_secure = urllib.request.build_opener(no_proxy_handler)
+# M-2 起该支不再带 file/ftp/data 三类 handler（见上方白名单说明）。
+_opener_secure = _http_only_opener(urllib.request.HTTPSHandler())
 
 # ── 安全边界说明（2026-09-12 审查 6.7 / 2026-09-14 F-12 落地，行为向后兼容）──
 # 「不校验证书」的 SSLContext 与 opener 一律**按需惰性构造**，禁止改回模块级常驻：import 期就
@@ -68,11 +118,10 @@ def _get_insecure_context() -> ssl.SSLContext:
 
 def _get_insecure_opener() -> urllib.request.OpenerDirector:
     # 惰性构造「禁用代理 + 禁用证书验证」的 opener（仅在确实需要时被调用）
+    # M-2：同样走 _http_only_opener 白名单（降级只降**证书校验**这一项，协议面不跟着放宽）。
     global _opener_insecure
     if _opener_insecure is None:
-        _opener_insecure = urllib.request.build_opener(
-            no_proxy_handler, urllib.request.HTTPSHandler(context=_get_insecure_context())
-        )
+        _opener_insecure = _http_only_opener(urllib.request.HTTPSHandler(context=_get_insecure_context()))
     return _opener_insecure
 
 
@@ -86,6 +135,27 @@ def _get_opener(ssl_verify: bool | None = None) -> urllib.request.OpenerDirector
     # 按「本次请求」的 SSL 验证裁决选择本地请求 opener。
     # ssl_verify=None 表示跟随全局开关（历史行为）；显式传值时以该次调用为准。
     return _opener_secure if _resolve_ssl_verify(ssl_verify) else _get_insecure_opener()
+
+
+def _reject_unsafe_scheme(url: str, stage: str) -> None:
+    # M-2（2026-09-29 审查 WP-B）：scheme 白名单的**唯一执行点**，两个调用位分别是
+    #   ① sync_req 入口（最初那个 URL）；
+    #   ② abroad 分支的重定向落地地址（该分支经 urllib.request.urlopen = 进程全局默认 opener，
+    #      仍带 FileHandler，无法像无代理分支那样在**发出之前**拒绝，只能在收到之后立刻抛错，
+    #      让文件内容绝不作为响应体外流）。
+    # 判定函数与 async 侧**同一个** utils.is_safe_http_url（src/async_http.py 的 async_req /
+    # get_response_status 入口用的就是它），不在本模块另写一份 urlparse 规则造成两份事实源。
+    # 抛 ValueError 而不是 return ""：本模块的失败契约由 sync_req 的外层 except 统一收口
+    # （记 error 日志 + 返回空串），因此调用方看到的形状与 async 侧「warning + 空值契约」一致，
+    # 异常不会穿透；异常文本自带脱敏（外层 except 还会对 {e} 再过一次 mask_credentials，
+    # 两层都留着——与 async 侧 WD-01 的双重脱敏同口径）。
+    # 没有改用 warning 级 + 直接 return：那需要一条能诚实描述「sync_req 拒绝非白名单协议」的
+    # tr 模板，而四语目录 + web/app.js 里现存的两条都写着 async_req / get_response_status
+    # 的函数名，拿来复用会把日志前缀写假；新增 tr 串又必须同步五处目录并重编 .mo
+    # （AGENTS「i18n 文案、目录与占位符」），不属本次改动的文件范围。
+    if utils.is_safe_http_url(url):
+        return
+    raise ValueError(f"sync_req 拒绝非白名单协议的请求（{stage}）: {utils.mask_credentials(url)}")
 
 
 _thread_local = threading.local()
@@ -232,6 +302,11 @@ def sync_req(
     verify = _resolve_ssl_verify(ssl_verify)
     resp_str = ""
     try:
+        # M-2：入口 scheme 白名单（与 async 侧 async_req/get_response_status 同一道防线、同一个
+        # 判定函数）。放在 try 内的第一条语句，是为了让拒绝路径继续走本函数既有的统一收口
+        # （记日志 + 返回空串），而不是把 ValueError 抛穿给调用方——sync_req 的返回契约是
+        # 「响应文本，失败一律空串」，调用方（含未来接线的平台解析函数）按空串判失败。
+        _reject_unsafe_scheme(url, "入口")
         if proxy_addr:
             # 使用代理的请求
             proxies = {"http": proxy_addr, "https": proxy_addr}
@@ -287,6 +362,17 @@ def sync_req(
                     # 本地请求：opener 按「本次调用」的 ssl_verify 覆盖选择（无代理）
                     _resp = cast(http.client.HTTPResponse, _get_opener(ssl_verify).open(req, timeout=timeout))
                 try:
+                    if abroad:
+                        # M-2：abroad 分支的重定向由 **urllib 进程全局默认 opener**（仍带 FileHandler，
+                        # 本模块不得 install_opener 去换它）执行，入口白名单只覆盖最初的 URL，
+                        # 故落地地址必须复核。写在内层 try 的第一条是为了让拒绝路径照样落到
+                        # 下面的 finally —— _resp.close() 归还句柄，否则每命中一次就漏一个已打开的
+                        # 文件/连接对象。
+                        # 这是「不外流」而非「不访问」：该跳请求已发出、目标已被读出，本行让它在
+                        # 成为响应体之前随 ValueError 一起丢掉。无代理分支不需要这一步——它的
+                        # opener 里根本没有 file/ftp/data handler，跨 scheme 跳转在**发出之前**
+                        # 就被 UnknownHandler 拒成 URLError（见 _HTTP_ONLY_HANDLERS 上方说明）。
+                        _reject_unsafe_scheme(_resp.url, "重定向落地")
                     if redirect_url:
                         return _resp.url
 

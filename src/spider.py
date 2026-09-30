@@ -109,15 +109,69 @@ def _popkontv_credential() -> str:
 # live.shopee.sg，split(".", 1)[-1] 得到 "shopee.sg"，拼出 https://live.shopee.shopee.sg
 # 这样的非法 host，请求必失败 → 装饰器兜成未开播，即所有可路由的 Shopee 链接永久解析失败。
 # 唯一不命中的输入（shopee.co.id/live 无 live. 前缀）恰好不被 main.py 的 "live.shopee" 分发命中。
+# S-1（2026-09-29，见 docs/worklog/CODE_REVIEW_2026-09-29_2.md）：改为基于 urlparse().hostname 取 host。
+# 原 `url.split("/")[2]` 拿的是**整个 authority**（userinfo + host + 端口），于是
+# https://live.shopee.sg@127.0.0.1/ 切出来的「host」长得像白名单，而 httpx 真正连的是 127.0.0.1；
+# hostname 属性按 RFC 语义剥掉 userinfo 与端口，与 _shopee_is_allowed_host 取的是**同一个** host——
+# 两道判据必须看同一个取值，否则会出现「校验 A 主机、连接 B 主机」的错位（这是本项漏洞的根形态）。
 def _shopee_host_suffix(url: str) -> str:
     try:
-        host = url.split("/")[2]
-    except IndexError:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except ValueError:
+        # 畸形 authority（如 http://[::1 这类非法 IPv6 字面量）：与旧实现的 IndexError 分支同口径回 "com"
+        return "com"
+    if not host:
         return "com"
     # 剥掉 live. 子域首段后再取 shopee 之后的完整后缀（co.id / com.my / sg 均正确）
     host = re.sub(r"^live\.", "", host)
     parts = host.split(".", maxsplit=1)
     return parts[-1] if len(parts) > 1 and parts[-1] else "com"
+
+
+# S-1（2026-09-29）：镜像同文件小红书 SEV-2214（见 _XHS_ALLOWED_HOST_SUFFIXES / _xhs_is_allowed_host）
+# 的定稿实现。Shopee 短链（.shp.ee 等）解出的落地页由**响应**决定，而后续三次请求
+# （ongoing / replay_list / session）都复用同一份含 Cookie 的 headers（调用方经 [Cookie] shopee_cookie
+# 透传登录态）。此前对落地页零 host 校验 → 一条恶意分享链接即可把用户 Shopee Cookie 递送到任意
+# http(s) host，并把 api_host 指向内网/回环/云元数据（SSRF）。
+# 白名单取 Shopee 各官方站点的**可注册域**（含两段式 TLD）+ 官方短链宿主 shp.ee：
+# 必须逐段枚举，不能写成「含 .shopee. 即放行」——live.shopee.evil.com 是 evil.com 的子域，
+# 攻击者握有其 DNS，字面看着像官方域但连接目标完全由他控制。
+# 新增市场时在此追加一条即可（追加后 host_suffix 的取值才会被第三道闸放行）。
+_SHOPEE_ALLOWED_HOST_SUFFIXES = (
+    "shopee.sg",
+    "shopee.com",
+    "shopee.co.id",
+    "shopee.com.my",
+    "shopee.com.ph",
+    "shopee.co.th",
+    "shopee.vn",
+    "shopee.com.br",
+    "shopee.mx",
+    "shopee.cl",
+    "shopee.tw",
+    "shopee.fr",
+    "shopee.es",
+    "shopee.pl",
+    "shp.ee",
+)
+
+
+def _shopee_is_allowed_host(url: str) -> bool:
+    # 落地页/接口 host 是否落在 Shopee 域族内。用「精确等于或 . 后缀」判定，防 evil-shopee.sg /
+    # shopee.sg.evil.com 这类后缀伪装（裸 endswith 会把 notshopee.sg 也放行）——与小红书同判据。
+    # 额外显式拒绝 userinfo（netloc 含 @）：urlparse 把 https://live.shopee.sg@127.0.0.1/ 的
+    # hostname 解成 @ **之后**的 127.0.0.1，真实连接目标是回环而非白名单域，故「hostname 看着像
+    # 官方域」在这种输入上不成立，必须整条拒掉。
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if "@" in parsed.netloc:
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return any(host == suffix or host.endswith("." + suffix) for suffix in _SHOPEE_ALLOWED_HOST_SUFFIXES)
 
 
 def _safe_extract_id(url: str, default: str = "") -> str:
@@ -198,6 +252,23 @@ def invalidate_twitch_client_id_cache(proxy_addr: OptionalStr = None) -> None:
         _cache_invalidate_generic(f"twitch_client_id|{k}")
 
 
+def _take_cached_kuaishou_did(proxy_addr: OptionalStr) -> str:
+    # M-8（2026-09-29）：快路必须判「出口(proxy)一致性」，参照 src/ttwid.py 的 MIN-2220 已修形态。
+    # 下层 singleflight 键 f"kuaishou_did|{proxy or ''}" 与写入侧的 _cached_kuaishou_did_proxy 都带
+    # 代理维度，唯独原来的模块全局快路只看「非空 + TTL」→ 代理 A 取到的 did 在 TTL 内被代理 B 的
+    # 房间直接复用。快手的 did 与出口 IP 绑定，串用表现为间歇「200 + 空 body」风控，且
+    # invalidate 链会连带清掉另一个出口本来正常的值、下一轮又重新抢占，整条链路来回抖动。
+    # 不匹配时只回空串、**不清全局**——那份值对它自己的出口仍然有效。
+    # ts==0.0 且值非空仍按有效处理（与 MID-33 的既有口径一致：只可能来自测试/外部直接注入全局）。
+    if not _cached_kuaishou_did:
+        return ""
+    if _cached_kuaishou_did_proxy != (proxy_addr or ""):
+        return ""
+    if _cached_kuaishou_did_ts and (time.monotonic() - _cached_kuaishou_did_ts) >= _CREDENTIAL_TTL:
+        return ""
+    return _cached_kuaishou_did
+
+
 async def _ensure_kuaishou_did(proxy_addr: OptionalStr = None) -> str:
     # 自动获取快手访客 did/didv（访问快手直播主页时服务器下发），替代硬编码过期凭据。
     # 改经统一 cookie 缓存（src/cookie_cache.fetch_cookies）从快手主页动态获取，
@@ -209,10 +280,10 @@ async def _ensure_kuaishou_did(proxy_addr: OptionalStr = None) -> str:
     # 改为经 cookie_cache.singleflight 统一去重：临界区内仅做字典读写，网络拉取在锁外，
     # 等待者经 future 复用同一份结果（跨循环经 call_soon_threadsafe 交付）。
     global _cached_kuaishou_did, _cached_kuaishou_did_ts, _cached_kuaishou_did_proxy
-    if _cached_kuaishou_did and (
-        not _cached_kuaishou_did_ts or (time.monotonic() - _cached_kuaishou_did_ts) < _CREDENTIAL_TTL
-    ):
-        return _cached_kuaishou_did
+    # M-8（2026-09-29）：快路判据收进 _take_cached_kuaishou_did（含出口一致性），理由见该函数注释。
+    cached_did = _take_cached_kuaishou_did(proxy_addr)
+    if cached_did:
+        return cached_did
 
     async def _fetch() -> str:
         cookies_dict = await _cache_fetch_cookies(
@@ -239,10 +310,18 @@ async def _ensure_kuaishou_did(proxy_addr: OptionalStr = None) -> str:
         _cached_kuaishou_did = got
         _cached_kuaishou_did_ts = time.monotonic()
         _cached_kuaishou_did_proxy = proxy_addr or ""
-    elif _cached_kuaishou_did and (time.monotonic() - _cached_kuaishou_did_ts) >= _CREDENTIAL_TTL:
+        return _cached_kuaishou_did
+    # M-8（2026-09-29）本轮没拿到新值的两条出口。全局留着的是**别的出口**的 did 时，既不能把它
+    # 递给本次调用（那正是快路漏判 proxy 的那条泄漏路径，失败分支同样要走一遍），也不能清掉它
+    # （对它自己的出口仍有效）。
+    if _cached_kuaishou_did and _cached_kuaishou_did_proxy != (proxy_addr or ""):
+        return ""
+    if _cached_kuaishou_did and (time.monotonic() - _cached_kuaishou_did_ts) >= _CREDENTIAL_TTL:
         # TTL 已过期且本轮重取失败：旧值不再返回（原行为是永久返回旧值），回空串交调用方下轮重试
+        # 代理记录随值一并清空，保持「值非空 ⟺ 出口记录有效」这一对写入/清空同点的不变量。
         _cached_kuaishou_did = ""
         _cached_kuaishou_did_ts = 0.0
+        _cached_kuaishou_did_proxy = ""
     return _cached_kuaishou_did
 
 
@@ -634,10 +713,18 @@ async def get_douyin_web_stream_data(
             json_data = cast(dict[str, object], parsed.get("data") or {})
             inner_list = json_data.get("data")
             if not inner_list:
-                raise Exception(f"{url} VR live is not supported or room not found")
+                # M-3（2026-09-29）：进 raise 的 URL 一律先过 utils.mask_credentials。
+                # @trace_error_decorator 落日志时对异常原文不做任何脱敏，而调用方透传的房间地址
+                # 可能挂着 token/ttwid/cookie 类查询参数（pwd/session 均在 utils._SECRET_KEYS 表内），
+                # 明文抛出即等于把凭据写进 logs/streamget.log（300 KB 轮转保留多份 = 长期落盘）。
+                raise Exception(f"{utils.mask_credentials(url)} VR live is not supported or room not found")
             room_data = cast(dict[str, object], cast(list[object], inner_list)[0])
             user_info = cast(dict[str, object], json_data.get("user") or {})
-            room_data["anchor_name"] = user_info.get("nickname")
+            # M-9（2026-09-29）：.get("nickname") 只挡「键缺失」，抖音显式返回 "nickname": null
+            # （游客态被风控/主页态房间）时取到 None 并写进结果 dict；下游 clean_name(None) 当场
+            # AttributeError（src/stream_select.py 的 clean_name 首行 input_text.strip()），整轮解析
+            # 被兜成「获取失败」且该轮已按成功样本上报熔断统计。文件内新代码统一走 _dig_str。
+            room_data["anchor_name"] = _dig_str(user_info, "nickname")
             return room_data
 
         room_data: dict[str, object] | None = None
@@ -819,10 +906,13 @@ async def get_douyin_app_stream_data(
             json_data2 = cast(dict[str, object], parsed2.get("data") or {})
             room_field = json_data2.get("room")
             if not room_field:
-                raise Exception(f"{url} VR live is not supported or room not found")
+                # M-3（2026-09-29）：同 get_douyin_web_stream_data 内同名判据（见该处注释全文）——
+                # APP 端这条路径同样把调用方 URL 拼进了异常消息，脱敏后才允许上抛。
+                raise Exception(f"{utils.mask_credentials(url)} VR live is not supported or room not found")
             room_data2 = cast(dict[str, object], room_field)
             owner = cast(dict[str, object], room_data2.get("owner") or {})
-            room_data2["anchor_name"] = owner.get("nickname")
+            # M-9（2026-09-29）：同 web 端 _try_web_api 的判据（见该处注释）——null 昵称一律回 ""。
+            room_data2["anchor_name"] = _dig_str(owner, "nickname")
             return room_data2
         except Exception as e:
             raise Exception(f"Douyin app data fetch error, because {e}.")
@@ -1080,7 +1170,9 @@ async def get_kuaishou_stream_data(
         return result
 
     author = cast(dict[str, object], play_list.get("author") or {})
-    anchor_name = author.get("name", "")
+    # M-9（2026-09-29）：.get("name", "") 的缺省只在「键不存在」时生效，快手网页端显式下发
+    # "author": {"name": null} 时结果仍是 None，并向下游 clean_name() 蔓延。
+    anchor_name = _dig_str(author, "name")
     result.update({"anchor_name": anchor_name})
 
     play_urls_obj = live_stream.get("playUrls")
@@ -1275,7 +1367,9 @@ async def get_huya_app_stream_url(
     json_data = _loads_dict(json_str)
     data_field = cast(dict[str, object], json_data.get("data") or {})
     profile_info = cast(dict[str, object], data_field.get("profileInfo") or {})
-    anchor_name = profile_info.get("nick")
+    # M-9（2026-09-29）：虎牙小程序接口对被封禁/注销房间返回 "nick": null，
+    # 裸 .get 取到 None 会随 {"anchor_name": None} 一路传到 clean_name()（同抖音 web 端判据）。
+    anchor_name = _dig_str(profile_info, "nick")
     live_status = data_field.get("realLiveStatus")
     live_data = cast(dict[str, object], data_field.get("liveData") or {})
     live_title = live_data.get("introduction")
@@ -2008,6 +2102,21 @@ _bili_buvid_is_fallback = False
 _bili_buvid_cached_proxy = ""
 
 
+def _take_cached_bili_buvid(proxy_addr: OptionalStr) -> str:
+    # M-8（2026-09-29）：buvid 的进程级快路同样必须判「出口(proxy)一致性」，判据与理由见
+    # _take_cached_kuaishou_did（同一 bug 的第二处：下层 singleflight 键 f"bili_buvid3|{proxy}"
+    # 与写入侧 _bili_buvid_cached_proxy 都带代理维度，唯独快路只看非空）。
+    # 串用的后果比 did 更隐蔽：B站弹幕服务器按 AUTH 判定设备标识，代理 B 的房间拿着代理 A
+    # 注册的 buvid3 进房 → AUTH 被软拒绝（弹幕静默收不到，视频照常录），而日志上看不到出口差异。
+    # 与 did 不同，这份全局本来就没有 TTL 判定（设备级标识长期有效是既有语义），本轮只补出口维度、
+    # 不顺手加 TTL——那会改变「真实 buvid 一旦拿到即永久复用」的既有行为与 MID-40 的失效链。
+    if not _bili_buvid_cached:
+        return ""
+    if _bili_buvid_cached_proxy != (proxy_addr or ""):
+        return ""
+    return _bili_buvid_cached
+
+
 def invalidate_bili_buvid_cache(proxy_addr: OptionalStr = None) -> None:
     # 使进程内 buvid 缓存失效（不清 cookie_cache 的首页 Set-Cookie TTL 缓存——那里存的
     # 是真实注册标识，可继续复用）。触发方为弹幕 AUTH 被拒：兜底 UUID 被服务器拒绝后
@@ -2113,7 +2222,11 @@ async def get_bilibili_danmaku_info(
 
     async def _fetch_buvid() -> str:
         # 单条获取链（不含进程缓存层，由 singleflight 负责去重与缓存）
-        b = _bili_buvid_cached
+        # M-8（2026-09-29）：这里读全局也必须按出口取值。本函数跑在 singleflight 的 factory 里，
+        # 返回值会被写进 **本次调用所用 proxy** 对应的那条桶（key=f"bili_buvid3|{proxy}"）——
+        # 若这里直接取别出口的全局值，就等于把「A 的 buvid」固化进「B 的桶」，
+        # 之后即便快路修好了，下层缓存仍在持续喂回串用值（比快路更难自愈）。
+        b = _take_cached_bili_buvid(proxy_addr)
         if not b and cookies:
             _m = re.search(r"buvid3=([^;\s]+)", str(cookies))
             if _m and _m.group(1).strip():
@@ -2177,9 +2290,10 @@ async def get_bilibili_danmaku_info(
                 )
         return b
 
-    if _bili_buvid_cached:
-        buvid = _bili_buvid_cached
-    else:
+    # M-8（2026-09-29）：快路按出口取值（不匹配即下沉到按 proxy 分桶的 singleflight）。
+    # 锁类型、加锁位置与 global 声明一律不动——本函数临界区零 await，去重仍由 singleflight 承担。
+    buvid = _take_cached_bili_buvid(proxy_addr)
+    if not buvid:
         # 兜底 UUID 也须走 singleflight：否则并发下每个协程各自生成不同 UUID，
         # 后写覆盖先写，_bili_buvid_cached 抖动。
         # factory 返回 (buvid, is_fallback) 元组：判据随结果一起缓存，避免调用方
@@ -3083,11 +3197,17 @@ async def get_netease_stream_data(
     # 会把 None 交给下游 clean_name()（MID-43 同类），改为 _dig_str 后一律回 str。
     result["anchor_name"] = _dig_str(live_data, "nickname") or _dig_str(room_data, "nickname")
     if live_status:
+        # M-9（2026-09-29）同型收口：sharefile 显式为 null 时 .get 取到 None，而本分支已把
+        # is_live 置真 → 下游 stream.py 的 `n.get("m3u8_url", "")` 拿到的还是 None（键存在、
+        # 值为 null，缺省不生效），record_url 跟着变 None。_dig_str 一律回 str，与「无源」
+        # 的既有判定（falsy 即不取流）口径一致。
+        # quickplay 保持原样：它是**字典**（按画质键索引，见 src/stream.py 的网易CC 分支），
+        # 不是字符串字段，缺失时上游 `if stream_list_data:` 已按 falsy 安全处理。
         result |= {
             "is_live": True,
             "title": _dig_str(live_data, "title"),
             "stream_list": live_data.get("quickplay"),
-            "m3u8_url": live_data.get("sharefile"),
+            "m3u8_url": _dig_str(live_data, "sharefile"),
         }
     return result
 
@@ -3196,8 +3316,13 @@ async def get_pandatv_stream_data(
         if error_data is not None:
             error_code = _dig(error_data, "code")
             if error_code == "needAdult":
+                # M-3（2026-09-29，本项主案发现场）：私有/成人房的房间密码就挂在 url 的
+                # ?pwd= 上（pwd 在 utils._SECRET_KEYS 表内），而 @trace_error_decorator 落日志时
+                # 对异常原文零脱敏 → 受限房每轮把明文密码写进 logs/streamget.log（轮转保留多份）。
+                # 只脱敏、不改文案结构与抛出语义（调用方与既有断言均按原样匹配这条消息）。
                 raise RuntimeError(
-                    f"{url} The live room requires login and is only accessible to adults. Please "
+                    f"{utils.mask_credentials(url)} "
+                    f"The live room requires login and is only accessible to adults. Please "
                     f"correctly fill in the login cookie in the configuration file."
                 )
             else:
@@ -3359,8 +3484,11 @@ async def get_winktv_stream_data(
         if error_data is not None:
             error_code = _dig(error_data, "code")
             if error_code == "needAdult":
+                # M-3（2026-09-29）：与 PandaTV 同族实现（见 get_pandatv_stream_data 内的说明）——
+                # WinkTV 的受限房地址同样可能带 ?pwd=，异常消息里的 URL 必须先脱敏。
                 raise RuntimeError(
-                    f"{url} The live stream is only accessible to logged-in adults. Please ensure that "
+                    f"{utils.mask_credentials(url)} "
+                    f"The live stream is only accessible to logged-in adults. Please ensure that "
                     f"the cookie is correctly filled in the configuration file after logging in."
                 )
             else:
@@ -3778,7 +3906,19 @@ async def login_popkontv(
         )
         raise
     except Exception as e:
-        logger.error(i18n.tr("An exception occurred during popkontv login: {e}", e=e))
+        # M-4（2026-09-29）：本函数是全文件唯一**绕过 async_req** 的生产 httpx 请求，因此拿不到
+        # async_http 那条「异常文本一律过 mask_credentials」的现成防线（见 async_req 的失败分支）。
+        # httpx/urllib3 的连接与代理异常原文里会内嵌**含 user:pass@ 的代理 URL**（本仓 [Proxy] 配置
+        # 允许 http://user:pass@host:port 写法），而 logger.error 直接落 logs（轮转保留多份 = 凭据长期落盘）。
+        # 同时按 AGENTS「异常日志必须带异常类型与上下文」补 type_name：Windows 下超时类异常的 str(e)
+        # 可能是空串，裸 {e} 会打出一条空白行、无法归因。
+        logger.error(
+            i18n.tr(
+                "An exception occurred during popkontv login: {type_name}: {e}",
+                type_name=type(e).__name__,
+                e=utils.mask_credentials(str(e)),
+            )
+        )
         raise
 
 
@@ -4135,7 +4275,8 @@ async def get_twitcasting_stream_url(
     parts = url.split("?")[0].split("/")
     # 畸形 URL（无主播 ID 段）：显式报错而非 IndexError
     if len(parts) < 4 or not parts[3].strip():
-        raise RuntimeError(f"无法从链接中解析 TwitCasting 主播 ID: {url}")
+        # M-3（2026-09-29）：异常消息里的 URL 先过脱敏（同 PandaTV/WinkTV 口径）
+        raise RuntimeError(f"无法从链接中解析 TwitCasting 主播 ID: {utils.mask_credentials(url)}")
     anchor_id = parts[3]
     # 调用方透传 cookie 时优先采用；否则走游客态/自动获取凭据（各平台未登录态取流能力不一，部分更易被风控）
     if cookies:
@@ -4181,7 +4322,13 @@ async def get_twitcasting_stream_url(
         anchor_name, live_status, live_title = await get_data(headers)
     # 解析阶段抛 AttributeError（页面结构变化/受限，正则 group 落在 None 上）即视为需登录，
     # 这里统一回落到登录流程再抓一次；登录失败则向上抛 RuntimeError。
-    except AttributeError:
+    # M-10（2026-09-29）：同一分支还必须接住 ValueError。get_data 在四个正则任一未命中时
+    # **显式** `raise ValueError("Failed to parse page data")`——这才是受限房/改版的主形态，
+    # 而 AttributeError 只在「正则命中了但 group 取不到」这类少境里出现。原实现只 catch
+    # AttributeError，于是注释承诺的「解析失败 → 登录重试」在这条最常见路径上是**死分支**：
+    # 受限房直接判未开播，登录态永远用不上。PEP 758 无括号写法（本分支不绑定异常对象）。
+    # 回归锁：tests/test_spider.py::TestTwitCastingParseFailureLoginFallback
+    except AttributeError, ValueError:
         logger.error("Failed to retrieve TwitCasting data, attempting to log in...")
         new_cookie = await login_twitcasting(
             account_type=cast(str, account_type),
@@ -4361,7 +4508,8 @@ async def get_weibo_stream_data(
         parts = url.split("?")[0].rsplit("/u/", maxsplit=1)
         # 畸形 URL（无 /u/ 用户段）：显式报错而非 IndexError
         if len(parts) < 2 or not parts[1].strip():
-            raise RuntimeError(f"无法从链接中解析微博用户 ID: {url}")
+            # M-3（2026-09-29）：异常消息里的 URL 先过脱敏（同 TwitCasting 口径）
+            raise RuntimeError(f"无法从链接中解析微博用户 ID: {utils.mask_credentials(url)}")
         uid = parts[1]
         web_api = f"https://weibo.com/ajax/statuses/mymblog?uid={uid}&page=1&feature=0"
         json_str = await async_req(web_api, proxy_addr=proxy_addr, headers=headers)
@@ -6030,11 +6178,54 @@ async def get_shopee_stream_url(
     is_living = False
 
     # 非直链且非店铺主页：先解析重定向拿到真实 host/会话
+    # S-1（2026-09-29，镜像同文件小红书 SEV-2214 的两道闸 + 剥凭据口径）：落地页由**响应**决定，
+    # 而下方三处请求都复用含 Cookie 的 headers，故跳转结果必须过两道闸才允许替换 url：
+    #   ① 落地页 host 必须落在 Shopee 域族白名单内（_shopee_is_allowed_host，含 userinfo 拒绝）；
+    #   ② 落地页不得解析到内网/回环/云元数据/CGNAT/缩写 IP（复用仓内既有判定
+    #      web_config._host_internal_reason，不自造——它已覆盖 inet_aton 缩写 IP、
+    #      metadata 域名等绕过形态）。
+    # 任一条不满足即丢弃跳转结果、保留原始用户填写的 url（原请求是用户自己填的合法短链宿主，
+    # 不会把凭据送往响应指定的目标），并置 landing_untrusted 让后续请求一律剥离 Cookie。
+    landing_untrusted = False
     if "live.shopee" not in url and "uid" not in url:
         url_result = await async_req(url, proxy_addr=proxy_addr, headers=headers, redirect_url=True, abroad=True)
         # 重定向失败（空响应）时保留原 URL 继续解析，避免后续 split 越界
         if isinstance(url_result, str) and url_result:
-            url = url_result
+            _landing = url_result
+            if _shopee_is_allowed_host(_landing):
+                try:
+                    # DNS 判定；web_config._host_internal_reason 解析失败（NXDOMAIN）也返回拒绝理由。
+                    _landing_host = (urllib.parse.urlparse(_landing).hostname or "").lower()
+                    _internal_reason = (
+                        web_config._host_internal_reason(_landing_host) if _landing_host else "缺少主机名"
+                    )
+                except Exception as e:
+                    _internal_reason = f"内网判定异常: {type(e).__name__}"
+                if _internal_reason is None:
+                    url = _landing
+                else:
+                    landing_untrusted = True
+                    logger.warning(
+                        i18n.tr(
+                            "Shopee 短链落地页不可信，已忽略跳转: {url} ({reason})",
+                            url=utils.mask_credentials(_landing),
+                            reason=_internal_reason,
+                        )
+                    )
+            else:
+                landing_untrusted = True
+                logger.warning(
+                    i18n.tr(
+                        "Shopee 短链跳转到非白名单主机，已忽略跳转: {url}",
+                        url=utils.mask_credentials(_landing),
+                    )
+                )
+
+    if landing_untrusted:
+        # 凭据外送防线第二层：跳转被判不可信后，本轮所有后续请求（含按原 url 拼出的 api_host）
+        # 都不再携带调用方 Cookie。不可信判定说明「响应会把请求引向攻击者指定的主机」这一事实
+        # 已经成立，不能因为「丢弃了这次跳转」就当作凭据安全。
+        headers.pop("Cookie", None)
 
     # 畸形 URL（无 host）：判未直播早退，避免后续 split 越界抛 IndexError
     if "://" not in url or len(url.split("/")) < 3 or not url.split("/")[2]:
@@ -6051,10 +6242,29 @@ async def get_shopee_stream_url(
 
     uid = get_params(url, "uid")
     api_host = f"https://live.shopee.{host_suffix}"
+    # S-1 的第三道闸（也是最后一道）：校验对象是**构造结果**而不是输入。前两道闸只看落地页输入，
+    # 而 host_suffix 是从 host 上切下来的任意片段——它被投毒成 "evil.com" 时，拼出的
+    # api_host=https://live.shopee.evil.com 是 evil.com 的子域（攻击者握有 DNS），
+    # 前两闸按字面看着像官方域、放行照样外发凭据。放在**任何带凭据请求发出之前**，
+    # 不过即按未开播早退并告警；不回退到其它 host——Shopee 只有 live.shopee.<官方站点后缀>
+    # 一个接口宿主，拼不出合法宿主就说明这条链接本身不可路由。
+    if not _shopee_is_allowed_host(api_host):
+        logger.warning(
+            i18n.tr(
+                "Shopee 接口域名不在白名单内，本轮按未开播返回: {host}",
+                host=utils.mask_credentials(api_host),
+            )
+        )
+        return result
     session_id = get_params(url, "session")
     if uid:
+        # uid/session 取自 URL 查询串或接口响应，直接拼进请求行会让 "a&b=x" 这类值变成**新增查询参数**
+        # （参数走私）；按仓内既有做法（urllib.parse.urlencode/quote）做 percent 编码后再拼。
         json_str = await async_req(
-            f"{api_host}/api/v1/shop_page/live/ongoing?uid={uid}", proxy_addr=proxy_addr, headers=headers, abroad=True
+            f"{api_host}/api/v1/shop_page/live/ongoing?uid={urllib.parse.quote(uid, safe='')}",
+            proxy_addr=proxy_addr,
+            headers=headers,
+            abroad=True,
         )
         json_str = _get_str_response(json_str)
         # MID-48（2026-09-21）：三个 shopee 接口都会在校验失败时返回不含 data 的信封
@@ -6073,7 +6283,7 @@ async def get_shopee_stream_url(
             is_living = True
         else:
             json_str = await async_req(
-                f"{api_host}/api/v1/shop_page/live/replay_list?offset=0&limit=1&uid={uid}",
+                f"{api_host}/api/v1/shop_page/live/replay_list?offset=0&limit=1&uid={urllib.parse.quote(uid, safe='')}",
                 proxy_addr=proxy_addr,
                 headers=headers,
                 abroad=True,
@@ -6097,8 +6307,13 @@ async def get_shopee_stream_url(
         logger.debug(i18n.tr("Shopee 房间链接未带 session 且无进行中的直播，本轮按未开播返回"))
         return result
 
+    # session_id 落在**路径段**上（不是查询串），同样须做 percent 编码：未编码时
+    # "../x"、"?a=b"、"#frag" 这类值能改写请求的行与查询串（S-1 同批收口，仓内既有做法同上）。
     json_str = await async_req(
-        f"{api_host}/api/v1/session/{session_id}", proxy_addr=proxy_addr, headers=headers, abroad=True
+        f"{api_host}/api/v1/session/{urllib.parse.quote(session_id, safe='')}",
+        proxy_addr=proxy_addr,
+        headers=headers,
+        abroad=True,
     )
     json_str = _get_str_response(json_str)
     json_data = _loads_dict(json_str)

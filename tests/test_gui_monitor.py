@@ -13,9 +13,15 @@
 # src.logger 都被判成 GUI 父进程、不再创建录制日志文件——跨文件污染源。
 # 故行为判据经**子进程**驱动真实实现（测试内不重新实现被测逻辑），
 # 结构性约束另行以 AST / 文本静态锁读取源码。
+#
+# 2026-09-29 审查 M-31①：该子进程原按 text=True/encoding="utf-8" 解码、却不给子进程注入
+# PYTHONUTF8/PYTHONIOENCODING —— 无该环境变量的中文 Windows（ACP=936）上可抛
+# UnicodeDecodeError（本机 shell 恰好带 UTF-8 所以从不触发）。现显式钉 UTF-8，并把判定
+# 改为按字节比较（AGENTS「探测子进程输出一律按字节比较」），解码只用于失败时的诊断文本。
 
 import ast
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -68,20 +74,43 @@ _MARKER = "\n@@GUI@@ "
 _TTL_CACHE: dict[str, float] = {}
 
 
+def _subprocess_env() -> dict[str, str]:
+    # M-31①（2026-09-29 审查）：显式给子进程钉死 UTF-8，不再依赖宿主 shell 恰好带该环境。
+    # 缺这两项时，无 PYTHONUTF8 的中文 Windows（ACP=936）上子进程 sys.stdout 走 GBK，
+    # 而 _SCRIPT 里 json.dumps(..., ensure_ascii=False) 带中文房间名/主播名 —— 父进程按
+    # utf-8 解码即抛 UnicodeDecodeError（本机 shell 恰好有 UTF-8，所以此前从不触发）。
+    # 只读 os.environ 取基底、绝不写回本进程环境（AGENTS：环境变量一律用 monkeypatch，
+    # 且本进程根本没有改它的理由）。
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _decode_loosely(raw: bytes) -> str:
+    # 仅用于**失败时的诊断文本**：不参与任何判定（判定一律按字节，见 _gui_call），
+    # 因此 errors="replace" 兜底即可，绝不让解码影响用例结论。
+    return raw.decode("utf-8", errors="replace")
+
+
 def _gui_call(call: str, **kwargs: Any) -> Any:
     payload = json.dumps({"call": call, **kwargs}, ensure_ascii=False)
+    # AGENTS「探测子进程输出一律按字节比较，且这类用例必须能单文件独立运行」：
+    # 不传 text=/encoding=/errors= —— 父进程拿到的是原始字节，marker 判定按字节做，
+    # 与宿主码页、子进程控制台语言完全解耦；只有判定通过之后才把 marker 之后的载荷
+    # 按 utf-8 解出（那份 JSON 的编码由上面注入的 PYTHONIOENCODING 保证）。
     proc = subprocess.run(
         [sys.executable, "-c", _SCRIPT],
-        input=payload,
+        input=payload.encode("utf-8"),
         capture_output=True,
-        text=True,
-        encoding="utf-8",
         timeout=180,
         cwd=str(ROOT),
+        env=_subprocess_env(),
     )
-    assert proc.returncode == 0, f"gui subprocess failed: {proc.stderr[-2000:]}"
-    assert _MARKER in proc.stdout, f"no result marker in: {proc.stdout[-500:]}"
-    return json.loads(proc.stdout.split(_MARKER, 1)[1])["result"]
+    marker = _MARKER.encode("utf-8")
+    assert proc.returncode == 0, "gui subprocess failed: " + _decode_loosely(proc.stderr)[-2000:]
+    assert marker in proc.stdout, "no result marker in: " + _decode_loosely(proc.stdout)[-500:]
+    return json.loads(proc.stdout.split(marker, 1)[1].decode("utf-8"))["result"]
 
 
 def _ttl_seconds() -> float:

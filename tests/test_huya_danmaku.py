@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from typing import Any, cast
@@ -87,14 +89,36 @@ def test_join_data_ayyuid_overflow() -> None:
     assert isinstance(data, bytes) and len(data) > 0
 
 
-def test_profileRoom_fields() -> None:
+def test_profileRoom_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     # get_huya_app_stream_url 返回的 dict 含弹幕所需三元组, 与 web 路径字段一致。
+    requested: list[str] = []
 
-    async def fake_async_req(url: Any = None, proxy_addr: Any = None, headers: Any = None) -> str:
+    async def fake_async_req(
+        url: str,
+        proxy_addr: Any = None,
+        headers: Any = None,
+        data: Any = None,
+        json_data: Any = None,
+        timeout: int = 20,
+        redirect_url: bool = False,
+        return_cookies: bool = False,
+        include_cookies: bool = False,
+        abroad: bool = False,
+        content_encoding: str = "utf-8",
+        verify: bool | None = None,
+        http2: bool = True,
+    ) -> str:
+        # 形参集合与生产 src/async_http.py::async_req 逐项对齐（含 data= / json_data= / timeout= /
+        # verify= 等）：残缺签名会让本用例只覆盖「虎牙这一条调用链」，而同会话里任何
+        # 带 data= 的 spider 调用一旦落到这只替身就抛 TypeError——M-25 修的就是这类漂移。
         # 数值型 roomid 不触发 html 抓取, 直接返回 profileRoom JSON
+        requested.append(url)
         return json.dumps(PROFILEROOM_SAMPLE)
 
-    spider.async_req = fake_async_req  # type: ignore[assignment]
+    # M-25（CODE_REVIEW_2026-09-29_2）：原写法 `spider.async_req = fake_async_req` 是对模块本体
+    # 的裸赋值、且**没有还原**——同 pytest 进程里后续所有 spider 用例都会拿到这只虎牙固定 JSON
+    # 替身（表现为「单独跑绿、整包跑红」的跨文件假失败）。monkeypatch.setattr 逐属性登记还原。
+    monkeypatch.setattr(spider, "async_req", fake_async_req)
     result = asyncio.run(
         spider.get_huya_app_stream_url(
             url="https://www.huya.com/660000",
@@ -102,6 +126,8 @@ def test_profileRoom_fields() -> None:
             cookies=None,
         )
     )
+    # 替身确实被走到（否则上面的断言全在测真实网络，CI 离线时只会以另一种方式红）
+    assert any("do=profileRoom" in u for u in requested), f"未请求 profileRoom 接口: {requested}"
 
     assert result["is_live"] is True
     assert result["yyid"] == 1486578378
@@ -124,5 +150,8 @@ def test_profileRoom_fields() -> None:
 if __name__ == "__main__":
     test_int64_branch()
     test_join_data_ayyuid_overflow()
-    test_profileRoom_fields()
+    # 脚本形态没有 pytest fixture：用 MonkeyPatch.context() 提供同一个 monkeypatch，
+    # 退出 with 即逐属性 undo（R6 口径：手工 MonkeyPatch 实例必须配对还原，context() 自带）。
+    with pytest.MonkeyPatch.context() as _mp:
+        test_profileRoom_fields(_mp)
     print("test_huya_danmaku.py: all passed")

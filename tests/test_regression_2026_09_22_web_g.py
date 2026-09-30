@@ -80,7 +80,7 @@ def fake_main(monkeypatch: pytest.MonkeyPatch) -> Generator[types.ModuleType, No
 
 @pytest.fixture(scope="function")
 def app_env(tmp_path: Path, fake_main: types.ModuleType) -> Generator[types.SimpleNamespace, None, None]:
-    from fastapi.testclient import TestClient
+    from starlette.testclient import TestClient
 
     from src import web_api as wa
 
@@ -336,7 +336,7 @@ class TestAuthKeyReauth:
         # 关闭态（出厂默认）单独造：fixture 的 app_env 是开启态，而「认证关闭时不要求复验」
         # 这条反向边界只有在关闭态下才验得出来。绑定未接线 → _guard_bind_host 回落到
         # 配置里的 127.0.0.1（回环），中间件不会先把「无认证」的请求锁在门外。
-        from fastapi.testclient import TestClient
+        from starlette.testclient import TestClient
 
         cfg = tmp_path / "config_auth_off.ini"
         cfg.write_text(

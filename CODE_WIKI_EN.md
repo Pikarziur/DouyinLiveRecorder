@@ -144,7 +144,7 @@ Platforms that support actual quality feedback and downgrade alerting: Douyin, T
 | Node.js + exejs/PyExecJS | Run JavaScript signing algorithms (exejs preferred, PyExecJS fallback) |
 | Loguru | Structured logging |
 | CustomTkinter + pystray + Pillow | GUI and system tray |
-| FastAPI + uvicorn | Web management panel backend |
+| Starlette + uvicorn | Web management panel backend |
 | HTML + CSS + JavaScript | Web management panel frontend |
 | Docker | Containerized deployment |
 | gettext (msgfmt) | Internationalization translation compilation |
@@ -231,9 +231,11 @@ DouyinLiveRecorder/
 │   ├── node_install.py                # Node.js 自动安装/初始化
 │   ├── ffmpeg_master_download.py       # FFmpeg master-build downloader (per-platform/arch fetch + verification, challenge-page aware, TOFU)
 │   ├── ttwid.py                        # 抖音访客 ttwid 获取
-│   ├── web_api.py                      # Web 管理面板 FastAPI 应用
-│   ├── web_config.py                   # Web 面板配置读写（不依赖 FastAPI）
+│   ├── web_api.py                      # Web 管理面板 Starlette 应用
+│   ├── web_models.py                   # Web 请求体校验层（纯标准库 dataclass + parse，替代 pydantic）
+│   ├── web_config.py                   # Web 面板配置读写（不依赖 Web 框架）
 │   ├── web_tray.py                     # Web 模式系统托盘（Windows 最小化到托盘）
+│   ├── ui_theme.py                     # GUI 主题层（语义 token + 多主题 + ttk 注册 + 持久化 + 对比度机检）
 │   ├── http_config.py                  # HTTP 客户端共享运行时配置（SSL 验证开关）
 │   ├── async_http.py                   # 异步 HTTP 客户端 (httpx)
 │   ├── sync_http.py                    # 同步 HTTP 客户端
@@ -264,7 +266,8 @@ DouyinLiveRecorder/
 ├── web/                                 # Web 管理面板前端
 │   ├── index.html                      # 单页应用入口
 │   ├── app.js                          # 前端逻辑（API 调用、SSE、渲染）
-│   └── style.css                       # 样式表（主题、响应式）
+│   ├── motion.js                       # 前端动效引擎（零依赖 IIFE：入场/视差/粒子/降级）
+│   └── style.css                       # 样式表（主题、响应式、动效 token）
 ├── i18n/                                # 国际化翻译目录（多语言多格式）
 │   ├── zh_CN/LC_MESSAGES/
 │   │   ├── zh_CN.po                   # 简体中文翻译源（gettext）
@@ -736,8 +739,8 @@ NETEASE_QUALITY_MAP = {"blueray": "OD", "ultra": "UHD", "high": "HD", "standard"
 **Architecture**:
 
 - `web.py` - entry: a daemon thread runs `main.main()`, the main thread runs uvicorn; supports a hidden background run mode
-- `src/web_api.py` - FastAPI app: authentication (Token), REST API routes, SSE push, static asset mounting
-- `src/web_config.py` - config read/write (does not depend on FastAPI, convenient for unit tests)
+- `src/web_api.py` - Starlette app: authentication (Token), REST API routes, SSE push, static asset mounting
+- `src/web_config.py` - config read/write (does not depend on Web framework, convenient for unit tests)
 - `web/` - frontend static assets (single-page application)
 
 **Background run mode** (`web_show_console = false`):
@@ -969,11 +972,9 @@ def host_of(url: str) -> str: ...
 | customtkinter | >=6.0.0 | Modern GUI framework |
 | pystray | >=0.19.5 | System tray (GUI / Web tray mode) |
 | Pillow | >=12.3.0 | Image processing (tray icon generation) |
-| fastapi | >=0.140.0 | Web management panel backend framework |
-| starlette | >=1.3.1 | ASGI toolkit (transitive dependency of fastapi, explicitly declared because `src/web_api.py` imports it directly; lower bound 0.49.1 → 1.0.1 → 1.3.1, see the CVE/PYSEC notes) |
+| starlette | >=1.3.1 | ASGI framework (`src/web_api.py` migrated from FastAPI to depend on Starlette directly in phase 2; lower bound 0.49.1 → 1.0.1 → 1.3.1, see the CVE/PYSEC notes) |
 | uvicorn[standard] | >=0.51.0 | ASGI server |
 | python-multipart | >=0.0.32 | Form/file upload parsing |
-| pydantic | >=2.13.4 | Request model validation |
 | websockets | >=14.0 | Danmaku WebSocket client (`src/ws_client.py`; `additional_headers` is a 14.0+ API) |
 | protobuf | >=6.33.5,<8 | Douyin danmaku protocol decoding (`src/proto/douyin_pb2.py`; the `<8` cap is a gencode compatibility guard) |
 | brotli | >=1.2.0 | Bilibili danmaku decompression (protover=3) |
@@ -1610,6 +1611,358 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > Scripts: `tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`
 > (`python file.py <URL> [seconds]`; requires a live room + network; manual channel by default).
 > **Rolling archive**: this section keeps only the current release window; older entries live verbatim in [`docs/changelog/code-wiki-history-en.md`](docs/changelog/code-wiki-history-en.md) (rule stated in the "Changelog Archive Index" above).
+
+### v4.4.0-dev (2026-09-30) — Three hand-back items from the review report landed (1-A sync-probe internal guard / 2-A retry exit-code buckets / 3-A live-script template gate) plus a new machine check against unrestored mutations
+
+> The previous batch left three items for the user to decide. All three were approved and landed as
+> 1-A / 2-A / 3-A. During the work an actual incident was found and turned into a machine check (new rule R8).
+
+**1. 1-A — internal-target guard for the synchronous probe (`src/stream_select.py`, `src/async_http.py`)**
+
+The previous batch only wired the per-hop re-check into the asynchronous side, and I described the gap as
+"the synchronous probe has the same shape but is un-wired (per-hop level)". Re-reading the code
+**corrects that premise**: the only call site of the internal-target judgement in the whole repository was
+`async_http.get_response_status`, so the synchronous probe had **no internal/loopback/cloud-metadata check even for
+the initial URL** — it only had the `_is_recordable_url` scheme-shape whitelist, which blocks `file://`/`concat:`
+but not `http://127.0.0.1:6379`. A hijacked platform API returning an internal stream address was enough to hit it.
+
+| Item | Content |
+| --- | --- |
+| Single factory | Both self-built `httpx.Client` sites now go through `_probe_client()`, which attaches the synchronous response hook (`build_sync_hop_guard`); the judgement reuses the one implementation in `async_http` — **no second copy in stream_select** |
+| Import cycle | The hook factory is imported **inside the function**, following the technique documented at `async_http.py:518-521` (this module has a module-level `import main`, so a module-level outgoing edge would change initialisation order) |
+| Initial check | `_validate_stream_url` runs `internal_stream_target_reason` before the first request; it deliberately does not reuse the variant that carries a scheme whitelist, because the protocol dimension is already gated by `_is_recordable_url` — the two guards do not substitute for each other |
+| Exception convergence | `RedirectHopRejected` (extending `httpx.HTTPError`, not `RuntimeError`) becomes the same `False` as "this candidate failed validation" inside `_validate_stream_url` and **never escapes**; the "treat the list as reachable" fallbacks in `_confirm_get_ok` / `_probe_hls_segment` must `raise` — otherwise the last candidate returns `True` and hands an internal address to `ffmpeg -i` |
+| Not regressed | Probe client scope stays single-selection, no `(proxy, verify)` module-level cache, keepalive not disabled, `utils.handle_proxy_addr` normalisation not moved |
+| Locks | `tests/test_sync_probe_internal_guard.py` (includes AST structure locks: one construction site, `event_hooks` argument must come from the synchronous factory, both call sites pass the initial check); the asynchronous lock file stays green |
+
+**2. 2-A — the retry composite action supports exit-code buckets (`.github/actions/retry/action.yml`, `.github/workflows/ci.yml`)**
+
+| Item | Content |
+| --- | --- |
+| New optional input | `fail_fast_codes`, `required: false`, `default: ""`; **when unset the behaviour of existing call sites is unchanged verbatim** (backoff arithmetic, both message texts, final `exit 1`) |
+| Hit semantics | The branch sits **before** the backoff `sleep`, prints `::error:: … configuration-class error … retrying is pointless` and `exit "$rc"` keeping the original code; it must never exit 0 nor degrade to a warning (that would be a false green) |
+| Parsing | `IFS=", "` + `set -f` + `case ''|*[!0-9]*`: space/comma mixes parse, illegal entries are ignored with a `::warning::`, and matching uses a space-padded string so a list containing `2` does not match rc=12; strictly POSIX, no bash-only associative arrays |
+| Wiring | Only the web smoke call site passes `"2"`, closing M-32(2)'s "a broken config must not be retried" |
+| Premise corrected | The work order said "10 call sites"; measurement found **16** (11 in ci.yml, 5 in build-release.yml) — earlier batches had already migrated more install steps into this action. The structure lock therefore pins 16 as a lower bound (only-decrease semantics) and asserts "regex count == YAML structural count" so a drift in the `uses` form cannot silently disable AGENTS' own grep gate |
+| Locks | `tests/test_ci_retry_action.py`: 4 structural locks + 8 real-`bash` behaviour cells (they run the production script extracted from `action.yml`, no copy, so deleting the production branch must redden); when bash is missing the test **fails explicitly instead of skipping** |
+
+**3. 3-A — live-script template gate R7 (`tests/test_test_hygiene.py` + the five `test_*_live_collector.py`)**
+
+Four AST criteria, each named individually: ① an `__main__` guard that really calls `main()`; ② no module-level
+collection-time side effects (only imports / constant assignment / the sanctioned `sys.path` injection are allowed);
+③ the argv numeric guard; ④ output-directory cleanup must filter by platform prefix and check the entry type first.
+The reverse witness was extended as required: each criterion is fed its worst-case form (must redden) and a compliant
+source (must not false-positive), plus four new cases that mutate the real scripts and demand that only the
+corresponding criterion reddens.
+
+**4. Two documented premises that turned out to be wrong**
+
+1. **AGENTS' own argv-guard sample was falsified by measurement**: the documented one-liner
+   `SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else N` breaks under
+   `pytest a.py b.py`, where `sys.argv[2]` is the **next test file's path** — it carries no `-` prefix, passes the
+   non-option test, and `int(path)` raises ValueError, erroring that module's collection outright
+   (measured: 4 errors during collection). All five scripts now use the two-step form
+   `_SECONDS_RAW = …` → `int(_SECONDS_RAW) if _SECONDS_RAW.isdigit() else N`; R7③ machine-checks it and the AGENTS
+   entry body was corrected (falsified statements get rewritten in place).
+2. **The report's finding about blind directory clearing was real**: `test_bili_live_collector.py` /
+   `test_huya_live_collector.py` used `for f in os.listdir(base_dir): os.remove(...)` (no prefix filter, no type
+   check), which throws when a subdirectory is present and deletes other platforms' artefacts under parallel runs.
+   Now filtered by platform prefix + `isfile`, keeping the original intent of starting from a clean directory.
+3. **AGENTS' "the retry action is rc-agnostic, rc=2 cannot actually stop early (pending decision)" was closed by 2-A**
+   and the entry body was updated accordingly.
+
+**5. The incident and the new machine check R8 (guarding against unrestored mutations)**
+
+A parallel work package mutated the HLS segment branch in `src/stream_select.py` to prove a lock was not fake
+(removing `except RedirectHopRejected: raise`), hit its turn limit, and left `pass  # MUTATION-M4c …` **in the
+production file**. The consequence is not a missing comment: `seg_resp` was left unassigned → `UnboundLocalError`
+swallowed by the outer `except Exception` as a "probe error" → the last candidate returned `True` →
+**an internal address was handed to `ffmpeg -i`**. This shape is invisible to black / mypy / the annotation checker
+(syntactically valid, type-clean, and it even adds comments); only a test that actually executes that branch catches
+it — which is exactly what the new synchronous-probe case did.
+
+R8 now scans source files repository-wide and reddens if a `MUTATION-` marker survives; three hard constraints were
+written back into AGENTS' "mandatory test-writing conventions" (in-memory backup + byte-exact restore in `finally`;
+markers must be left during the mutation; when taking over an interrupted work package, the first step is to scan for
+residue rather than assume the implementation is complete). The guard protects itself three ways: the marker literal
+is built by concatenation (otherwise the gate would flag its own source), it asserts the traversal covers >200 files
+(a wrong scan root would otherwise spin silently), and the reverse witness covers all three legs.
+
+**6. Verification**
+
+| Item | Reading |
+| --- | --- |
+| 1-A real outbound probe | Public HLS (walking the playlist **and the segment-probe branch** that held the residue) `test-streams.mux.dev/x36xhzz/x36xhzz.m3u8` → **True** (no false rejection); `http://127.0.0.1:6379/`, `http://169.254.169.254/latest/meta-data/`, `http://10.0.0.5/live.m3u8`, `http://100.64.0.1/live.m3u8` → all **False**; internal target with `last_resort=True` → **False** (the last candidate is not handed an internal address); `file:///etc/passwd` → **False** (shape whitelist intact) |
+| Real "public → internal" redirect chain | **SKIP(no usable public redirector)**: httpbingo.org returns 403 to this host and no public endpoint 302s into a private address; covered via `httpx.MockTransport`, no fabricated readings |
+| 2-A | `pytest tests/test_ci_retry_action.py` alone → **12 passed / 0 warnings** (4 structural + 8 real-bash cells); end-to-end wiring check with the real ci.yml `with` values and the GitHub-filled default → `runs=1 / rc=2 / 0.23s` (a real backoff with `backoff=5` would take ≥5s); three mutation runs: delete branch `4 failed, 8 passed`, `default` → `"2"` `1 failed, 11 passed`, branch moved after `sleep` `4 failed, 8 passed`; all restored byte-identical |
+| 3-A / R8 | `pytest tests/test_test_hygiene.py` → **507 passed**; R8's disk path proven with a one-shot probe file: adding `tests/_tmp_r8_probe.py` (containing a marker) → `AssertionError: tests/_tmp_r8_probe.py:7`, removing it → green; probe deleted |
+| Live recording chain | Douyin room `live.douyin.com/699394970561` → SKIP(room offline at run time); the affected path is the source-selection validator, whose real outbound evidence is the row above |
+| Full gates | `python scripts/run_gates.py` 8/8 green with an empty pytest warnings summary (readings in the delivery reply) |
+
+**7. Still open**
+
+- The `inputs → env` expansion happens on the GitHub runner; locally we only proved the script behaves correctly once
+  the default is filled the GitHub way. After merging, check that the first failing web-smoke log shows
+  `exit code 2 is a configuration error … not retried`.
+- The five `build-release.yml` call sites deliberately do not pass `fail_fast_codes` (they install via choco/apt/brew/pip,
+  where no "configuration-class" exit code exists; passing one would only weaken retry on network flakiness). A
+  structure lock pins "nobody passes it" instead of letting that drift.
+- The hook still fires after the hop's response has been received (what is closed is "no further following and no
+  leakage", not "no connection"); intercepting before connect would need a request hook (two checks and two
+  `getaddrinfo` calls per hop), and the DNS-rebinding window is not closed at this layer — all recorded as residual
+  risk in the source comments and here.
+- The previous batch's eyeball items and live gaps are unchanged (M-14/M-16/M-18/M-22 visual checks, M-11 needs an
+  outbound route for TikTok, no live Douyu room at the time, `basedpyright` not installed locally).
+
+### v4.4.0-dev (2026-09-29) — Fix batch for the full-repository review report CODE_REVIEW_2026-09-29_2 (P0+P1+P2, 31 numbered items)
+
+> Implemented per `docs/worklog/CODE_REVIEW_2026-09-29_2.md`, within the scope the user approved: P0+P1+P2
+> (31 numbered IDs / 33 distinct issues). Deliberately out of this batch: minor items 43-47 (front-end a11y),
+> the P3 items M-6 (tighten the VBS match surface) / M-7 (migu wasm SRI) / M-20 (frozen-bundle i18n measurement),
+> and every item the report flagged "to be confirmed". Every fix ships with a regression lock; security
+> invariants additionally got mutation verification.
+
+**1. Security hardening (S-1, M-1 ~ M-5)**
+
+| ID | Where | What |
+| --- | --- | --- |
+| S-1 | `src/spider.py:140-174`, `112-121`, `6183-6254` | The Shopee short-link landing page now passes the **same two gates** that XHS SEV-2214 introduced: host-family allowlist (via `urlparse().hostname`, exact-or-`.`-suffix, userinfo rejected) plus `web_config._host_internal_reason` for internal/loopback/cloud-metadata targets. An untrusted landing page is discarded, the user-entered URL is kept and the Cookie header is stripped. The constructed `api_host` is re-checked against the allowlist (so a poisoned `host_suffix` cannot leak), and `_shopee_host_suffix` moved from raw string splitting to hostname parsing |
+| M-1 | `src/async_http.py:87`, `460`, `532-588`, `679` | **Per-hop** redirect re-validation for the probe and every `async_req` branch: one `event_hooks` response hook wired at the single `_build_client` site re-runs `_internal_stream_target_reason` on each hop's landing URL, stopping the chain and returning the existing "unreachable" semantics. The DNS-rebinding window is registered as residual risk (judgement results are deliberately not cached) |
+| M-2 | `src/sync_http.py:56-140`, `309`, `375` | `sync_req` gains a scheme allowlist (reusing `utils.is_safe_http_url` rather than a second implementation) and its opener is built from an explicit protocol whitelist that no longer registers FileHandler/FTPHandler/DataHandler; the abroad branch, which uses the process-global `urlopen`, gets a post-landing re-check |
+| M-3 | `src/spider.py:716-720`, `911`, `1126`, `1289`, `1848`, `3324`, `3490`, `4279`, `4512`, `5137` and more | Raw URLs entering `raise`/log calls now pass `utils.mask_credentials` first (the primary case was the PandaTV/WinkTV private-room `pwd` landing in rotated logs; Douyin / TwitCasting / Weibo closed on the same standard) |
+| M-4 | `src/spider.py:3908-3920` | `login_popkontv` — the only production httpx request in the file that bypasses `async_req` — masks the exception text and adds `type_name`, so proxy `user:pass@` cannot reach the logs |
+| M-5 | `src/notify.py:92-98`, `113-155`, `173-187`, `203-205` | All four post-record custom-script failure branches mask the command text; the second `communicate()` after a timeout is now bounded; process-tree reclamation uses `start_new_session` + `killpg` on POSIX and `taskkill /T /F` on Windows (argv list, never shell=True), degrading to the original `kill` on any failure |
+
+**2. Recording and resolver correctness (M-8 ~ M-13)**
+
+| ID | Where | What |
+| --- | --- | --- |
+| M-8 | `src/spider.py:207-324` | The module-global fast path for the Kuaishou `did` and Bilibili `buvid3` caches now compares the proxy context, so a fingerprint obtained via proxy A is no longer reused by rooms on proxy B (mirrors the already-fixed ttwid MIN-2220). Lock types and the cross-await semantics untouched |
+| M-9 | `src/spider.py:723`, `914`, `1173`, `1370`, `1610`, `3200` | Remaining `anchor_name`-can-be-None sites unified on `_dig_str` / `isinstance(v, str)`, eliminating the `clean_name(None)` crash that used to knock out the whole parsing round |
+| M-10 | `src/spider.py:4325-4331` | The TwitCasting restricted-room login fallback now also catches `ValueError` (PEP 758 parenthes-free form); the promised "parse failure → login retry" path was previously unreachable |
+| M-11 | `src/stream.py:654-691` | TikTok quality selection no longer writes the FLV-clamped index back into the shared variable: the original requested index is kept and FLV/HLS are clamped independently against their own list lengths (same standard as the Douyin branch in the same file); the fallback base was fixed in the same pass. HLS-only rooms asking for the lowest tier no longer silently pull the top tier without a downgrade warning |
+| M-12 | `main.py:4950-4959` | The danmaku platform list becomes a list comprehension with `strip()` and empty-item filtering, matching the HLS exclusion list in the same function; `"斗鱼直播, B站直播"` no longer never matches |
+| M-13 | `src/platforms/bilibili.py:55-159` | A `_report_close` gate was added to Bilibili host rotation: while candidates remain untried the event is an intermediate state (routed through `_on_reconnect` for tracing), and only exhaustion or the `_stopped` terminal state reports — exactly once. `_hosts_left` is zeroed when rotation ends, otherwise real disconnects mid-session get swallowed. Not pushed down into WsClient, the `backup_url` primary/backup rotation was not merged, and `src/ws_client.py` is untouched |
+
+**3. Web / i18n / front-end (M-18, M-19, M-21 ~ M-23, M-26)**
+
+| ID | Where | What |
+| --- | --- | --- |
+| M-18 | `web.py:199-239`, `258-262` | The "authentication disabled must not bind beyond loopback" gate was moved **above** `_enter_background_mode`, so the refusal text is no longer swallowed by the stdio redirect; the falsified "refuse = zero-side-effect exit" comment was corrected per the AGENTS exception clause and compressed into a one-line dated note |
+| M-19 | `i18n.py:399-414` | Both `tr()` except layers now include `AttributeError, TypeError` (measured: `{x.y}` with `x=None` raises AttributeError, `{x:d}` raises TypeError), honouring the "never raises" promise; `translated_print` was reviewed and has no equivalent gap (it never calls `.format`) |
+| M-21 | `web/app.js:753-870` | All three polling chains (SSE / log / danmaku) renew through one shared `makePollChain()` generation token: both `halt()` and `begin()` advance the generation, so an in-flight callback whose generation is stale is dropped and never re-schedules orphaned timer chains |
+| M-22 | `web/app.js:1498-1560`, `web/index.html:176-190`, `web/style.css` | The auth re-verification password is collected in a `type="password"` modal instead of `window.prompt`'s cleartext; all four exits funnel through `_settleReauth()` which clears the input node immediately; `reauth_password` is attached only to the two authentication keys' PUTs and no longer rides along on every other config key of the same save pass |
+| M-23 | `web/app.js:1107-1117` | The collapsed-danmaku counter `m.dropped` now goes through `esc()`, restoring this file's "every concatenation path is escaped" invariant |
+| M-26 | `tests/frontend/test_regression_2026_09_22_gates.mjs` | Removed two `doesNotMatch` text locks pinned to outdated source literals (the backend does enforce re-verification and the literal drifted, so the assertions passed vacuously and contradicted the new Python-side contract); replaced with a positive behavioural lock on "the authentication-key path really collects and sends `reauth_password`". Test count 32 → 36 |
+
+**4. GUI robustness (M-14 ~ M-17, M-24, M-31)**
+
+| ID | Where | What |
+| --- | --- | --- |
+| M-14 | `gui.py:1110-1360`, `3627`, `3684` | The quality-monitoring match patterns are now derived from **`i18n.tr()` results using the same msgid as the producer** (escaped then assembled) and recomputed lazily per language; hard-coded Simplified-Chinese constants removed. The one `src/recorder_status.py` literal that is **not** run through `tr()` continues to match verbatim, with the reason stated in the comment. The `#DLRQ` structured status protocol was **deliberately not introduced** — AGENTS key convention #13 lists it as a pending-approval long-term plan. A self-audit during wrap-up also fixed a defect this batch introduced itself: the per-language cache now only commits after re-verifying the language code is unchanged — the build reads `tr()` six times while the recording thread and the UI thread can switch language concurrently, so an unconditional write would freeze a **mixed-language** pattern set in place (lock: `test_mid_build_language_switch_is_not_cached`) |
+| M-15 | around `gui.py:1466`, `3519`, `3667`, `3132` plus `gui.py:1599-1612` | The renewal `after()` of the self-renewing chains moved into `try/finally` so it is re-armed unconditionally; external numeric fields such as `ts` go through one shared tolerance helper (a `null` record can no longer break the timer chain). Wrap-up added the **fourth chain of the same family**, `_pump_ui_events` (the UI event pump): its renewal sat on the last statement while the preceding "activate the log flush chain on demand" can raise during a window-destroy race — a broken pump means queued `post_ui` callbacks such as `_on_recording_stopped`/`_finalize_quit` never run (the window cannot be closed). The `_CHAINS` structural lock was extended to name all four |
+| M-16 | `gui.py:3226-3352`, `4175-4189` | New single-flight entry `_stop_child_once` shared by "stop recording" and "quit": quitting reuses an in-flight stop thread instead of a second concurrent console attach/detach sequence (console attachment is process-global state); both registration and deregistration sit on unconditional paths |
+| M-17 | `gui.py:3801-3844` | The tail thread's try/except was pushed down to **each event** (bad record → continue), so one malformed event no longer discards the intact events that follow it in the same chunk; the outermost handler now leaves a rate-limited warning |
+| M-24 | `tests/test_danmaku_monitor.py:562-599` | The tail test sets **the Event it actually passed in** and adds `assert not t.is_alive()` — "it stops after rotation" is verified for the first time (previously the daemon thread lingered until process exit) |
+| M-31 | `tests/test_gui_monitor.py:79-85`, `tests/test_danmaku_monitor.py:429` | The child process gets `PYTHONUTF8`/`PYTHONIOENCODING` explicitly; `import gui` moved out of collection time into the test body with an autouse fixture restoring `DLR_GUI_PARENT` in pairs (`patch.dict(os.environ)` forbidden) |
+
+**5. Test system and maintenance scripts (S-2, M-25, M-27 ~ M-30, M-32)**
+
+| ID | Where | What |
+| --- | --- | --- |
+| S-2 | `tests/test_twitch_live_collector.py:42`, `109`, structural lock `118-190` | The whole body moved into `def main()` + `if __name__ == "__main__": main()`, making it homogeneous with the four sibling live scripts. Evidence: `pytest --collect-only` went from **20.55 s / no tests collected / exit code 5** to **0.81 s / 1 test collected**; the collection-time live connection, `sleep 20`, `tests/_out_live` purge and session-killing `sys.exit(1)` are all gone |
+| M-25 | `tests/test_huya_danmaku.py:121` | The bare assignment `spider.async_req = fake` replaced by `monkeypatch.setattr` (the old form never restored and used an incomplete signature, poisoning the whole pytest session) |
+| M-27 | `tests/test_config_io_backup.py:20-26`, `tests/test_log_archive.py:114`, `tests/test_anchor_rename.py:15-20` | Patches of process-global `os.remove`/`os.rename` now go through a `SimpleNamespace(**vars(os))` shim installed on the module under test's own `os` reference (loguru and other background threads are no longer affected during the window) |
+| M-28 | `tests/frontend/test_motion.py` (new), `.github/workflows/ci.yml` | The five `test_motion.mjs` cases gained a Python wrapper and were added to the CI "Gate frontend tests not skipped" node-id list (`node --test <file>` only runs the named file and never discovers its siblings, so those degradation/cleanup locks never executed in normal CI). This batch also registers WP-G's new `tests/frontend/test_auth_reauth.py::test_auth_reauth` in the same list |
+| M-29 | `tests/test_machine_validation_fixes.py` | The heartbeat-timeout case now records the **timestamp and origin** of every `close()` and attributes per entry point, asserting the first close happens at the timeout point and before the deliberate stop (the old `len(close_called) >= 1` was blind to deleting the timeout branch); the "all three call sites timed out" aggregate count in the same file was tightened to per-entry attribution |
+| M-30 | `tests/test_notify.py:27`, `63`, `74` | Child-process commands use `sys.executable` instead of the literal `python` (images that ship only `python3` always failed these, while the local Windows box was always green) |
+| M-32 | `scripts/sync_metadata.py:112-158`, `scripts/smoke_test.py:87-192`, `214-218` | (1) `shutil.which` early return plus `OSError` catching: with uv missing the WARN branch is reachable and the egg-info rebuild still runs (the read-only `--check` path spawns no subprocess, pinned by a tripwire case). (2) `load_config` is the single validation point and malformed headers/checks shapes exit rc=2 (previously `.items()` raised AttributeError → rc=1, breaking the contract `_ci_web_smoke.sh` uses to tell "panel failure, retryable" from "config problem") |
+
+**6. i18n catalogue synchronisation (new strings from S-1/M-4)**
+
+- Four new msgids (three Shopee gate messages + the popkontv exception carrying `type_name`) were added to all four catalogues
+  (`zh_CN.po`, `en_US.json`, `en_GB.json`, `zh_TW.yaml`) and the `.mo` was regenerated; the collision-avoidance intermediate
+  `_i18n_pending_wpa.json` was deleted after the central merge, per AGENTS key convention #14.
+- Entry counts under both accepted measures (read locally on 2026-09-29, not estimated): JSON key count **791**;
+  `.mo` header N **792** (the header's empty msgid is counted, so N = key count + 1). Command used:
+  `python -c "import struct;print(struct.unpack('<6I', open('i18n/zh_CN/LC_MESSAGES/zh_CN.mo','rb').read(24))[2])"`;
+  `python scripts/compile_po.py --check` self-reports the same 792 (.po/.mo in sync);
+  `python scripts/extract_i18n_strings.py` reports 0 missing.
+
+**7. Verification (real devices, per AGENTS Definition of Done step 2)**
+
+| Date | Platform | Room address (masked) | Script | Result | Readable evidence |
+| --- | --- | --- | --- | --- | --- |
+| 2026-09-29 | Douyin | live.douyin.com/699394970561 | `tests/test_douyin_live_collector.py` | PASS | 59 messages / SRT 4518 bytes |
+| 2026-09-29 | Bilibili | live.bilibili.com/21452505 | `tests/test_bili_live_collector.py` | PASS | 9 messages / SRT 678 bytes, no "fake close" under the `_report_close` gate |
+| 2026-09-29 | Huya | www.huya.com/660000 | `tests/test_huya_live_collector.py` | WARN | 0 messages, connection healthy, no danmaku in that window (SRT produced) |
+| 2026-09-29 | Twitch | twitch.tv/forsen | `tests/test_twitch_live_collector.py` | WARN | 0 messages; the guarded script still runs standalone (live evidence for S-2) |
+| 2026-09-29 | Shopee | shp.ee/**** (invalid short link) | in-process probe `spider.get_shopee_stream_url` | live interception evidence | The landing-derived `api_host=https://live.shopee.ee` was blocked by the family allowlist gate with a warning and returned as not live — real outbound evidence for S-1 |
+| 2026-09-29 | Douyu | www.douyu.com/1, /23059, /9235411 | `tests/test_douyu_live_collector.py` | SKIP(room offline) | Anchor names still resolved correctly ("斗鱼官方视频号", "注意前方猪妖"), so the resolver chain is intact; re-run when a room is live |
+| 2026-09-29 | TikTok | www.tiktok.com/@tiktok | in-process probe | SKIP(no outbound route) | `ConnectTimeout` plus the built-in guest-cookie expiry warning; M-11 needs the user to re-run a real room with quality set to the lowest tier and confirm `logs/PlayURL.log` picks a non-first m3u8 |
+
+**8. Residual gaps and actions handed back to the user**
+
+- **GUI eyeball checks**: headless verification does not replace observation for M-14/M-15/M-16/M-17 — switch to English, restart recording, and confirm the quality page still shows recording lines / downgrade warnings / empty-state clearing; for M-22 confirm the password modal masks input and that the field is cleared on cancel.
+- **M-18**: the refusal text now reaches un-redirected stdout/stderr plus one warning, but double-clicking `python web.py` on a desktop still destroys the console window when `sys.exit(1)` runs; eliminating the "flash" entirely is a product decision (pause or banner before refusing).
+- **Three boundaries of the per-hop re-check (M-1)**: the synchronous probe in `src/stream_select.py` builds its own `httpx.Client` and does not go through `_build_client`, so that shape is still un-wired; the response hook fires only after that hop's response headers arrived (what is closed is "no further following and no leakage", not "no connection"); the DNS-rebinding window cannot be eliminated at this layer.
+- **The retry action is rc-agnostic**: `.github/actions/retry` retries on any non-zero exit code alike, so M-32(2)'s "rc=2 means a config problem, stop immediately" is currently only visible in the step log; at job level 1 and 2 remain indistinguishable — decide whether the retry action should gain an exit-code bucket input.
+- **Proposed new gate not implemented**: templating/lint checks for the live scripts (mandatory `__main__` guard, platform-prefixed cleanup) were kept as a recommendation, not added unilaterally.
+- **P3 / to-be-confirmed items untouched**: M-6, M-7, M-20 and the minor items flagged as needing measurement.
+
+### v4.4.0-dev (2026-09-29) — GUI freeze fix: adaptive wraplength reworked to true debounce + hysteresis, eliminating the event-storm oscillation during DPI rescale
+
+> Observed by the user: text flickering at high frequency → some UI elements rendered incompletely → the whole window freezing unresponsive. The root cause is the **previous fix (adaptive wraplength) writing synchronously inside `<Configure>`**, oscillating with CTk's DPI-rescale machinery. The trigger is dragging the window to a monitor with a different scale factor (or a system DPI change) — the same mechanism as the dev-time stress probe hang, through two different entrances.
+
+**1. Root-cause chain (all empirically verified)**
+
+1. CTk's DPI-change handling runs `ScalingTracker.update_scaling_callbacks_* → widget _set_scaling → _draw → _update_dimensions_event → update_idletasks` — a **mutually recursive pump** (nested frames visible deep in ctk_scrollbar.py).
+2. During rescale the internal label's width swings violently (probe measured 350↔1566 device px; at identical widths the wraplength got chased into `334→1038→190→858→…`).
+3. The old binding called `label.configure(wraplength=…)` synchronously on every Configure — each write re-invalidates geometry into the same idle queue, which then never drains: **`update()`/mainloop never returns = freeze**; the high-frequency relayout = flicker; starved paints = missing elements.
+4. Decisive control: under the same 10-flip DPI stress (via `set_widget_scaling`, the same callback chain as `check_dpi_scaling`) — with the binding active the loop never drained (killed at 120s = freeze reproduced); with the binding no-op'd the run **completed in 9.2s**.
+
+**2. Fix (gui.py)**
+
+| Item | Content |
+| --- | --- |
+| True debounce | `<Configure>` only resets a timer (`after_cancel` + `after(120ms)`); while the storm lasts **not a single write** happens — structurally impossible to feed geometry invalidation back into the recursion. Deliberately not "throttle to one write per 120ms" (a mid-storm write can re-ignite the recursion via the scrollbar threshold) |
+| Hysteresis | `_wrap_should_apply(current, new, scale_changed)` pure function: skip when `|new−current| ≤ max(12, 2%)` and the scale is unchanged. The ±~11-logical-px wobble of a scrollbar appearing/disappearing is absorbed; first apply (current==0) and any scale change (the conversion basis moved) always apply |
+| Race guard | `_run` is TclError-guarded throughout — the danmaku/quality placeholders are rebuilt every 2s, so a debounced callback can race destruction |
+| Startup shaping | if a real width already exists at bind time (winfo_width>1) apply once synchronously so the first frame wraps; later changes go through the debounce |
+
+**3. Verification**
+
+- Stress regression lock (`tests/test_gui_wrap_hints.py::TestRealWindowWrap::test_dpi_flip_stress_*`, real window, skips headless): full GUI build + 8 DPI flips must drain the event loop (the pre-fix equivalent times out) with ≤24 wraplength writes per label (measured ~1 per flip).
+- End-to-end real-window final check (1120×740, 150% system scaling): all four long hints unclipped; after simulated 1.2↔1.0 DPI flips everything converges to the correct wrapping with zero freezing.
+- 5 headless pure-function cases for the hysteresis + AST source locks for debounce/guards; `run_gates.py` 8/8, pytest 3308 passed / 0 warnings, basedpyright 0/0/0.
+
+**4. Known micro-edge**
+
+- For ~120ms after startup a long hint may render one unwrapped frame before the first debounced settle — an imperceptible trade for structurally safe zero writes during storms.
+
+### v4.4.0-dev (2026-09-29) — GUI text-clipping fix: adaptive wrapping for long hints (`_bind_adaptive_wraplength`), eliminating symmetric pack clipping on both sides
+
+> Observed on user screenshots (150% DPI, default 1120×740 window): the console hint "启动后将调用 main.py…" lost half of its first and last characters, and the danmaku empty-state hint was clipped at the right edge. The root cause is one family: **when a label's requested width exceeds the width its parent allocates, Tk pack centers it (default anchor=center) and clips symmetrically on both sides**; the quality page's fixed `wraplength=1000` is a variant of the same failure under narrow windows (right-edge clip). A repo-wide sweep found 5 sites of the same shape — all fixed together.
+
+**1. Changes by module**
+
+| Module | Nature | Key files | Key change / criterion |
+| --- | --- | --- | --- |
+| Adaptive wrapping | Added | `gui.py` | `_compute_wraplength(width_device_px, scale, margin)` pure function (device px → logical: CTk scales wraplength by `_widget_scaling` on configure (`ctk_label.py`), while `<Configure>` reports device pixels, so divide by `ScalingTracker.get_widget_scaling`; floor 120 prevents wraplength→0 from silently re-enabling clipping); `_bind_adaptive_wraplength(label)` binds the label's **own** window width (requires `pack(fill=tk.X)`: window width is packer-allocated, decoupled from the label's request — no wraplength→request→width feedback loop; sets an initial value from the current width because a re-pack with unchanged geometry fires no Configure); `ScalingTracker` imported from its definition path `customtkinter.windows.widgets.scaling.scaling_tracker` (the top-level namespace does not export it — reportAttributeAccessIssue) |
+| Wiring | Modified | `gui.py` | console hint now `pack(fill=tk.X, expand=True)` + binding; quality hint drops fixed `wraplength=1000` for the binding; the quality/danmaku empty-state labels consolidated into `_make_quality_placeholder` / `_make_danmaku_placeholder` factories (parameter `tk.Misc` — CTk 6.0's CTkScrollableFrame is not a CTkFrame subclass), shared by initial build and every refresh rebuild; duplicate copies of the copy reduced from 4 to 1 each |
+| Tests | Added | `tests/test_gui_wrap_hints.py` | three layers: subprocess unit tests of the pure function (conversion anchors 1584@1.5→1050 pinned, 120 floor, zero/negative scale, monotonicity); AST source locks (helper defined once with exactly 4 wiring points, each placeholder copy appears exactly once, no constant wraplength kwargs anywhere, factories must keep fill=tk.X + binding, both build and refresh paths must call the factories); a real-window case (fill=X label wraps without clipping in a narrow container, wraplength grows when widened; skips without a display — the only skip surface) |
+
+**2. Root causes & design points**
+
+1. **Why half-characters missing on both sides**: pack's default anchor=center centers an oversized child in its (too narrow) parcel, so the overflow is clipped equally left and right — "启" half-missing at the left and "制" half-missing at the right is the fingerprint of requested > allocated width.
+2. **Why binding the label's own width is safe**: under `fill=tk.X` the window width is entirely packer-allocated; changing wraplength only changes the requested height, never the window width, so oscillation is structurally impossible. Binding the parent's width would instead require subtracting sibling widgets (the button row) — more fragile.
+3. **The real-window case deliberately avoids `set_widget_scaling`**: a manual scaling override fights CTk's system-DPI tracking during real window mapping (measured event storm → `update()` never returns). The system's own DPI already exercises the conversion for real, and the formula is pinned by the pure-function anchors.
+4. **Two CTk 6.0.0 facts** (verified from source): `configure(wraplength=...)` multiplies by `_widget_scaling` internally while `cget("wraplength")` returns the logical value; `CTkScrollableFrame`'s MRO does not contain `CTkFrame` (they share only the `CTkBaseClass` ancestor).
+
+**3. Verification**
+
+- End-to-end measurement (this Windows machine, 150% system scaling, full `LiveRecorderGUI` built in a subprocess at the screenshot's 1120×740): before the fix the console hint measured reqwidth 768 > actual ~520 (symmetric clip) and the danmaku hint 1564 > 1538; after the fix all four long hints (console hint / danmaku placeholder / quality placeholder / quality hint) satisfy "requested ≤ allocated with wraplength active" (540≥519, 1196≥1092, 1196≥540, 1230≥986), the console hint wrapping onto two lines.
+- `run_gates.py` 8/8 green; full pytest 3300 passed / 14 skipped / 0 warnings; coverage all 44 modules above threshold; basedpyright 0 errors / 0 warnings / 0 notes; the real-window case passed three consecutive runs in ~8s each.
+- Regression locks: `tests/test_gui_wrap_hints.py` (10 cases); mutation check — removing either factory's `_bind_adaptive_wraplength` call or dropping fill=tk.X turns the AST locks red immediately.
+
+### v4.4.0-dev (2026-09-29) — GUI theme layer (Phase 3): 3 semantic-token themes + runtime switching + `[GUI] gui_theme` persistence + WCAG contrast machine-checks
+
+> Module-level overview of this change. Phase 3 (UI modernization · GUI theme layer) adds `src/ui_theme.py`
+> (zero display dependency, safe to import headless); the `gui.py` sidebar gains a "UI Theme" menu
+> (Light / Dark / High contrast) whose choice is written back to `config.ini [GUI] gui_theme` and registered
+> as a ttk theme (`dlr-<id>`, clam base). The `Colors` / `Fonts` facades and every existing symbol signature
+> are unchanged.
+
+**1. Changes by module (added / modified + file paths)**
+
+| Module | Nature | Key files | Key change / criterion |
+| --- | --- | --- | --- |
+| Theme engine | Added | `src/ui_theme.py` | 13 semantic slots (proposal §5.2's twelve + `on_primary`: in dark/high-contrast themes the primary button is a bright-blue fill whose label needs a near-black foreground — `surface` doubling as button text fails on dark); `THEMES` with three sets (light / dark / high_contrast); `contrast_ratio` per WCAG relative luminance; `CONTRAST_REQUIREMENTS` contract (body text 4.5 / non-text & disabled 3.0); `ThemeManager` (idempotent select/apply, guard against duplicate `theme_create`); `load/save_theme_preference` via `update_or_append_config_line` (creates missing section/key, preserves comments, atomic write) — deliberately not `config_io.read_config_value`, whose write-back holds `main.file_update_lock` (recorder lock system) |
+| GUI wiring | Modified | `gui.py` | imports `src.ui_theme`; `__init__` reads `[GUI] gui_theme` — an explicit preference syncs the CTk appearance mode to the theme's family, otherwise follow the system appearance (pre-upgrade behavior kept); sidebar "UI Theme" `CTkOptionMenu` (i18n display names) + `_on_theme_change` (select → apply → persist → appearance mapping → appearance-menu display sync → `_sync_canvas_bg`); `_THEME_CTK_MODE` / `_THEME_LABELS` module constants; `Colors`/`Fonts`/`LiveRecorderGUI`/`SystemTray`/`AdvancedSettingsWindow`/`_quality_alert_expired` symbols and signatures untouched |
+| Template & docs | Modified | `config/config.ini`, `README.md` | template gains `[GUI] gui_theme =` (empty = follow appearance); README config block documents the GUI section |
+| i18n | Synced | `zh_CN.po`(+`.mo`), `en_US.json`, `en_GB.json`, `zh_TW.yaml` | 7 new entries: UI theme label, three theme names, switch success and two write-failure messages (`{theme}`/`{type_name}`/`{err}` placeholders). Four-catalog key-set equality holds (i18n test locks green); `web/app.js` needs no sync — the theme menu is GUI-only copy with no web surface |
+| Tests | Added | `tests/test_ui_theme.py` | 34 cases: contrast-math anchors (black/white 21:1, white-on-#4F6DF5 pinned at 4.34), registry integrity (every slot, strict #RRGGBB), contrast contract parameterized across all pairs × themes, persistence (missing/invalid/round-trip/comment preservation/single-line on repeated save), switch idempotency (same-id short-circuit + byte-identical config), ttk-settings pure-data assertions + real-Tk integration (skips without a display — the only such case) |
+
+**2. Root causes & design points**
+
+1. **Contrast first**: all three themes' tokens were iterated to compliance (body 4.5 / non-text 3.0) with a scratch script before the values were baked into the module; light's `primary` is `#4358E8` (brand hue, deepened) — the original `#4F6DF5` measures 4.34:1 with a white label, below AA. The scratch script is deleted; `tests/test_ui_theme.py` keeps regressing the numbers.
+2. **The cost of 3:1 borders**: WCAG 1.4.11 non-text contrast pushes light's border to `#848DA0` (darker than common light borders) — the machine-checked contract wins over visual habit.
+3. **Visible effect boundary of Phase 3**: CTk widget colors are taken over by tokens in Phase 4 (ui_kit); for now a theme switch maps to the CTk appearance mode (high_contrast → dark) plus ttk element colors (effective once Phase-4 widgets land). The "Appearance mode" menu stays (it owns system-follow); Phase 4 unifies the two controls.
+4. **Idempotency in three places**: `select` short-circuits on the same id (no redundant config writes), `save` keeps a single line on repeated saves (update before append), `apply` guards duplicate registration (`theme_create` raises TclError on an existing theme name).
+
+**3. Verification**
+
+- `pytest tests/test_ui_theme.py` → 34 passed (locally including 3 real-Tk integration cases; on headless CI those 3 skip while the other 31 run).
+- Real-window smoke (this Windows machine, full `LiveRecorderGUI` built in a subprocess): with no preference the theme follows the system appearance to `light`; menu display names localized correctly; a simulated click on "High contrast" flipped `theme_manager.theme_id == "high_contrast"`, wrote `[GUI] gui_theme` into a temp copy, switched ttk to `dlr-high_contrast`, mapped CTk to Dark, and synced the appearance menu's display to "深色"; the real `config.ini` was never written (write path redirected).
+- `python scripts/run_gates.py` → 8/8 green; full pytest 3286 passed / 14 skipped / 0 warnings; coverage 84.07% (all 44 modules above threshold); basedpyright 0 errors / 0 warnings / 0 notes; `import gui` headless-import succeeds (compatibility contract).
+
+**4. Known edges & hand-back**
+
+- The real-Tk integration cases skip on headless CI (no X server on ubuntu runners); to run them in CI regularly, add xvfb to the test job (deferred to Phase 5 evaluation).
+- Coexisting "Appearance mode" and "UI Theme" menus are a Phase-3 transitional shape (the former owns CTk light/dark incl. system-follow, the latter owns token themes plus persistence); they get unified during the Phase-4 widget replacement.
+
+### v4.4.0-dev (2026-09-29) — Web backend FastAPI → Starlette migration: self-built route adapter + zero-dependency validation layer; all 24 route contracts and security invariants preserved verbatim
+
+> Module-level overview of this change. Phase 2 (UI modernization · framework replacement) migrates the Web admin panel backend
+> from FastAPI to Starlette directly: removes the `fastapi` / `pydantic` dependencies, adds `src/web_models.py`
+> (a pure-stdlib dataclass validation layer) and the `_route` adapter inside `src/web_api.py` (replicating FastAPI's
+> model-argument parsing / Query clamping / dict→JSON serialization / sync-endpoint threadpool dispatch). All 24 route
+> handlers are untouched; business logic and every security invariant (MID-*/SEV-*) are preserved verbatim. New
+> `tests/test_web_api_routes.py` dynamically asserts the route contract, replacing the static baseline
+> `web_api_routes_baseline.json` that tripped the sensitive-content gate.
+
+**1. Changes by module (added / modified / deleted + file paths)**
+
+| Module | Nature | Key files | Key change / criterion |
+| --- | --- | --- | --- |
+| Web backend framework | Migration (dependency removal) | `src/web_api.py` | `FastAPI()` → `Starlette()`; the 24 `@app.post/get/...` decorators replaced with `@_route(app, [METHOD], path)`; 5 `Query(...)` params de-decorated to plain defaults; `cast(FastAPI, request.app)` → `cast(Starlette, ...)`; auth middleware rewired as `app.add_middleware(BaseHTTPMiddleware, dispatch=auth_middleware)` [corrected 2026-09-29 runtime verification]: the initial draft wrongly claimed `@app.middleware("http")` was Starlette-native and kept verbatim — Starlette has no such decorator method and the import would raise AttributeError (mypy attr-defined agrees); FastAPI's decorator is exactly `add_middleware(BaseHTTPMiddleware, dispatch=...)` underneath; additionally a JSON `HTTPException` handler is registered (Starlette's built-in handler replies with a PlainTextResponse, dropping the `{"detail": ...}` error contract) |
+| Request model validation | Added (zero-dependency) | `src/web_models.py` | 9 dataclasses (LoginRequest / RoomCreate / RoomUpdate / RoomToggle / RoomQualityUpdate / QualityOptionsUpdate / RecordingToggle / ConfigUpdate / LanguageUpdate) use a `.parse(data)` classmethod instead of pydantic `BaseModel`; missing field / wrong type → ValueError; bool accepts only real Python bool; extra fields ignored |
+| Route adapter layer | Added | `src/web_api.py` | `_route` decorator factory: `inspect.signature`-driven classification (model arg / Query arg / request); JSON body parsed via `_read_json_body`, invalid body → 422; Query clamped by `_QUERY_DEFAULTS` default and bounds; sync `def` endpoints dispatched via `run_in_threadpool` (matches FastAPI, avoids blocking the event loop); non-Response returns wrapped in JSONResponse |
+| Tests | Migration + added | `tests/test_web_api.py`, `tests/test_web_config_locks.py`, `tests/test_danmaku_monitor.py`, `tests/test_regression_2026_09_22_web_g.py`, `tests/test_web_api_routes.py` | 5 `TestClient` imports switched to `starlette.testclient`; new dynamic route-contract test asserts the exact set of 24 route method/path pairs + the `/web` mount; deleted `tests/web_api_routes_baseline.json` |
+| Dependency manifests | Synced deletion | `requirements.txt`, `pyproject.toml` | Removed `fastapi>=0.140.0` and `pydantic>=2.13.4`; kept `starlette>=1.3.1` / `uvicorn` / `python-multipart`; name-set equality verified by `tests/test_regression_2026_09_22_gates.py` |
+
+**2. Root-cause details**
+
+1. **Performance & size**: FastAPI pulls in pydantic + pydantic_core, one of the Web panel's major size contributors; driving Starlette directly drops both, shrinking the bundle and startup overhead (size pending local re-measure with `scripts/report_bundle_size.py`).
+2. **Wiring semantics preserved**: Starlette, unlike FastAPI, does not auto-dispatch `def` sync endpoints to a threadpool nor auto-parse JSON bodies; missing either blocks the event loop or changes 422 behavior — the `_route` adapter restores each equivalent behavior, leaving handler bodies untouched.
+3. **422 contract deviation (known)**: the old field-level pydantic 422 `detail` is now a string `detail` (`str(ValueError)`); the frontend `apiError()` only reads the `detail` text, so behavior stays compatible.
+
+**3. Verification (2026-09-29 runtime re-run, venv restored)**
+
+- `python scripts/run_gates.py` → **8/8 green** (black / isort / mypy / annotation conventions / compile_po / check_version / check_runtime_pins / pytest backstop).
+- `pytest` → **3248 passed, 14 skipped, 0 failed, empty warnings summary**; with `--cov=src`, `scripts/check_coverage.py` reports all 43 modules above threshold (total coverage 83.98%); `basedpyright` 0 errors / 0 warnings / 0 notes.
+- `pytest tests/test_web_api.py tests/test_web_api_routes.py -q` → 165 passed, 2 skipped, 0 warnings.
+- Runtime verification caught and fixed two wiring errors the earlier static-only pass could not see:
+  1. `@app.middleware("http")` raises AttributeError at import time on Starlette (P0, panel unusable) → replaced with `add_middleware(BaseHTTPMiddleware, dispatch=auth_middleware)`;
+  2. `raise HTTPException` inside endpoints came back with a plain-text body under Starlette's built-in handler — the `{"detail": ...}` JSON contract drifted (a batch of security tests went red) → registered a FastAPI-equivalent JSON handler (headers passthrough keeps Retry-After usage).
+- Companion fixes: `scripts/check_version.py`'s web_api version check retargeted from `FastAPI(version=)` to the importlib.metadata dynamic-read shape (MIN-2262 fail-closed semantics kept; all three branches mutation-verified); the MID-2241 field-scan anchor in `tests/frontend/test_regression_2026_09_22_gates.mjs` moved to `src/web_models.py` and the endpoint-slice anchor to `@_route(app, ["GET"], "/api/language")`; the `/health` version assertion in `test_web_api.py` now reads the same-source `_APP_VERSION`; `uv.lock`/`egg-info` regenerated via `sync_metadata.py` (requires.txt free of fastapi/pydantic).
+
+**4. Not verified & hand-back (closed)**
+
+- ~~Gate green and runtime verification~~: done (see "3. Verification").
+- Still handed to a later phase: the bundle-size re-measure `python scripts/report_bundle_size.py dist/DouyinLiveRecorder` requires one `build_exe.py` run first (local `dist/` is empty; a phase-5 closing item). Note the local venv still has fastapi/pydantic leftovers from the removed manifest (`pip install -r requirements.txt` does not uninstall removed packages); gates and tests are unaffected, but the user should run `pip uninstall fastapi pydantic` in a normal terminal before the bundle re-measure to keep the environment in sync with the manifest.
+
+**5. Breaking changes**
+
+- Removed the `fastapi` / `pydantic` runtime dependencies; `src/web_models` models are read via `.parse()` instead of the pydantic API (internal use, no impact on external plugins). All other routes, request/response shapes, security headers, and the auth middleware behave unchanged.
+
+### v4.4.0-dev (2026-09-29) — Web front-end motion layer (Phase 1): scroll reveal / parallax particles / reduced-motion degradation, zero dependencies and zero build
+
+> Module-level overview: Phase 1 (UI modernization · front-end motion) adds `web/motion.js` (223 lines, zero-dependency IIFE mounting `window.__dlrMotion`), adds the `<canvas id="bg-canvas">` background layer and script reference to `web/index.html`, and adds motion tokens plus full `prefers-reduced-motion` coverage to `web/style.css`. **Motion only adds classes, never wrapper elements** — the `tbody.innerHTML` fragment assertions in `tests/frontend/*.mjs` regression locks are unaffected; dynamically rendered table rows do not participate in the reveal animation.
+
+**1. Changes by module (added / modified + file paths)**
+
+| Module | Nature | Key files | Key change / criterion |
+| --- | --- | --- | --- |
+| Motion engine | Added | `web/motion.js` | single rAF loop, IntersectionObserver reveal (threshold 0.15, rootMargin `0px 0px -8% 0px`, stagger `min(index*40, 240)ms`, one-shot unobserve on hit), DPR capped at 2, pauses on `document.hidden`, full degradation under `prefers-reduced-motion: reduce`, `destroy()` leaves no timers; particle count `clamp(18, floor(viewport area/22000), 64)`, halved when viewport <768px or `hardwareConcurrency ≤ 4` |
+| Page wiring | Modified | `web/index.html` | `<canvas id="bg-canvas" aria-hidden="true">` as the first child of `<body>` (pointer-events:none, z-index -1); `<script src="/web/motion.js">` appended at the end (defer, non-blocking) |
+| Motion styles | Modified | `web/style.css` | `#bg-canvas` fixed layer, `.reveal`/`.is-revealed` transitions, `:focus-visible` ring, full `@media (prefers-reduced-motion: reduce)` coverage (motion section ≈ lines 508–547); transitions only touch transform/opacity/border-color/box-shadow, never layout properties |
+| Tests | Added | `tests/frontend/test_motion.mjs` | 5 cases (node:test + node:vm sandbox driving motion.js: degradation gate / reveal / particle parameters / hidden pause / destroy cleanup), zero npm dependencies |
+
+**2. Verification & known deviation**
+
+- `node --test tests/frontend/*.mjs` → **65/65 green** (existing regression locks + 5 new); `tbody.innerHTML` fragment assertions intact.
+- **Known deviation**: motion.js measures 9449 bytes (≈9.2KB), about 15% over the ≤8KB performance budget in proposal §5.1 — defer loading, single rAF and read/write separation all hold; the size deviation is deferred to Phase 5 evaluation (minify or split; no functional impact).
 
 ### v4.4.0-dev (2026-09-29) — Web panel mobile fix: two-row top bar + safe-area / `dvh` adaptation + in-panel table scrolling, removing clipping and horizontal page scroll on iPhone 16 Pro Max and Pixel 10
 

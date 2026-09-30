@@ -11,6 +11,14 @@
 #     （MIN-2260：**0 断言不等于通过**——旧实现在这里退 0，CI 查了个空气还报成功。
 #      消费方是 scripts/_ci_web_smoke.sh + scripts/smoke_web.json，它原样透传本退出码，
 #      所以「2（配置问题）」必须与「1（接口不符合预期）」分得开，否则会被读成接口故障。）
+#     （M-32② 补全 2026-09-29：2 的覆盖面从「顶层结构坏 / 0 断言」扩到**任意**形态畸形——
+#      checks 不是 array、checks 元素不是 object、headers/expect_json 不是 object、
+#      expect_contains/base_url 类型错，全部在 load_config 前置拒绝并退 2。
+#      原先这些形态会穿透 run_check 抛 AttributeError，rc=1 且满屏崩溃栈，被
+#      scripts/_ci_web_smoke.sh 的调用方（.github/actions/retry）当成「面板接口挂了」
+#      再重试一轮：配置写坏了重试多少次都不会变好，只是把排障方向带偏、把 job 时间翻倍。
+#      校验点唯一在 load_config，绝不允许「先打了几个请求才第 N 条炸」的半执行状态。
+#      回归锁：tests/test_scripts_error_paths.py::TestSmokeConfigMalformed。）
 #
 # 用法：
 #   python smoke_test.py --config smoke_targets.json
@@ -71,16 +79,82 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 # ---------- 配置加载 ----------
+# 配置形状校验表：键 -> (允许的 JSON 类型, 报错里给出的期望形状示例)。
+# 为什么只列这三项：run_check 对它们**按形状遍历**（headers / expect_json 调 .items()、
+# expect_contains 直接迭代），形态写错就是 AttributeError 崩栈（rc=1）或「按字符迭代字符串」
+# 的静默误判；而 timeout / expected_status 这类标量原样透传给 urlopen/比较，本文件刻意
+# 声明「配置应保证为数字，不做强制转换」（见 run_check 内注释），不在这里偷偷改口径。
+_SHAPE_REQUIREMENTS: tuple[tuple[str, tuple[type, ...], str], ...] = (
+    ("headers", (dict,), 'object，如 {"Referer": "https://x/"}'),
+    ("expect_json", (dict,), 'object，如 {"status": "ok"}'),
+    ("expect_contains", (list,), 'array，如 ["欢迎", "在线"]'),
+)
+
+
+def _json_type(value: object) -> str:
+    # 报错文案用 JSON 术语而不是 Python 类名：配置文件是 JSON，作者脑子里的形状词是
+    # object/array/string，用 dict/list/str 反而要多做一次心智翻译。bool 必须先于 int 判
+    # （bool 是 int 的子类），None 单列（isinstance(None, ...) 全 False 会退化成 NoneType）。
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, (int, float)):
+        return "number"
+    return type(value).__name__
+
+
+def _validate_check_item(item: object, index: int, path: str) -> CheckConfig:
+    # 单条检查的形态校验：非 object 直接拒绝（旧形态会让 run_check 拿到 str/number，
+    # 在 .get() 上抛 AttributeError 崩栈 → rc=1，被消费方读成「接口故障」）。
+    if not isinstance(item, dict):
+        raise ValueError(
+            f"冒烟配置 checks[{index}] 是 {_json_type(item)}，每条检查必须是 JSON object（键值对）: {path}"
+        )
+    typed = cast(dict[str, object], item)
+    # 定位信息优先用配置作者自己写的 name，退化到 path/url，再退化到数组下标：
+    # 「第 3 条的 headers 写成了字符串」必须一眼能定位，不能只说「类型不对」。
+    label = typed.get("name") or typed.get("path") or typed.get("url") or f"checks[{index}]"
+    for key, allowed, expect_shape in _SHAPE_REQUIREMENTS:
+        if key not in typed:
+            continue
+        value = typed[key]
+        # 显式 null 与「不写该键」一律放行：三个键在 run_check 侧的读取都已归一到「空即跳过」
+        # （headers 走 `or {}`、expect_contains 走 `or []`、expect_json 走 `if expect_json:`），
+        # 拒绝 null 会让原本合法的配置突然变红，属行为回归而不是收口。
+        if value is None:
+            continue
+        if not isinstance(value, allowed):
+            raise ValueError(f"冒烟配置 {label} 的 {key!r} 是 {_json_type(value)}，期望 {expect_shape}: {path}")
+    return typed
+
+
 def load_config(path: str) -> tuple[list[CheckConfig], str | None]:
     # 2026-09-12 审查 6.7：编码由 utf-8 改 utf-8-sig。配置文件若带 BOM（Windows
     # 记事本/部分编辑器保存产物），utf-8 读取会把 BOM 当成首字符，json.load 直接
     # 抛 JSONDecodeError——排障时只看到"JSON 解析失败"，很难想到是 BOM。
     # utf-8-sig 对无 BOM 的文件行为与 utf-8 完全一致，无副作用。
+    #
+    # M-32②（2026-09-29）：本函数是配置形态的**唯一**校验点，所有畸形一律在这里抛
+    # ValueError，由 main() 的 `except (OSError, ValueError)` 转成退出码 2。
+    # 为什么必须在这里挡住、而不是留给 run_check 运行时炸：run_check 抛 AttributeError
+    # 会穿透 main() 变成崩溃栈（rc=1），而 scripts/_ci_web_smoke.sh + .github/actions/retry
+    # 对「任何非 0」都按可重试失败处理——配置写坏了重试多少次都不会变好，rc=1 只会让
+    # 排障方向从「改配置」错判成「查面板」，白跑一轮起面板 + 重试退避。
+    # 另一个必须在前置阶段挡掉的理由：校验晚于发请求会留下「前几条已打网络、第 N 条才崩」
+    # 的半执行状态，报告工件（-r 写出的 json）与结论都不自洽。
     with open(path, "r", encoding="utf-8-sig") as f:
         cfg = cast(object, json.load(f))
     if isinstance(cfg, list):
-        # 允许顶层直接写成 checks 列表
-        return cast(list[CheckConfig], cfg), None
+        # 允许顶层直接写成 checks 列表（该形态没有 base_url 位，返回 None 由命令行补）
+        items = cast(list[object], cfg)
+        return [_validate_check_item(item, i, path) for i, item in enumerate(items)], None
     if isinstance(cfg, dict):
         # 允许顶层写成 {"base_url": "...", "checks": [...]}
         # MIN-2260：原写法 typed.get("checks", []) 把「键名拼错」（check / targets / 少引号）
@@ -90,7 +164,23 @@ def load_config(path: str) -> tuple[list[CheckConfig], str | None]:
         typed = cast(dict[str, object], cfg)
         if "checks" not in typed:
             raise ValueError(f'冒烟配置缺少 "checks" 键（拼错或漏写都会被当成 0 检查）: {path}')
-        return cast(list[CheckConfig], typed["checks"]), cast(str | None, typed.get("base_url"))
+        # M-32②：checks 写成 object/string 时，`for c in checks` 迭代的是键名或字符，
+        # 每条都是 str → run_check 立刻 AttributeError（rc=1）。这里按期望形态收紧。
+        raw_checks = typed["checks"]
+        if not isinstance(raw_checks, list):
+            raise ValueError(
+                f'冒烟配置的 "checks" 是 {_json_type(raw_checks)}，'
+                f'期望 JSON array（如 {{"checks": [{{"path": "/"}}]}}）: {path}'
+            )
+        items = cast(list[object], raw_checks)
+        # base_url 同族缺陷：非 str 时 _resolve_url 的 base_url.rstrip 直接 AttributeError。
+        cfg_base = typed.get("base_url")
+        if cfg_base is not None and not isinstance(cfg_base, str):
+            raise ValueError(
+                f'冒烟配置的 "base_url" 是 {_json_type(cfg_base)}，期望 JSON string（如 "http://127.0.0.1:8000"）: '
+                f"{path}"
+            )
+        return [_validate_check_item(item, i, path) for i, item in enumerate(items)], cast("str | None", cfg_base)
     # 既不是 list 也不是 dict：配置已损坏，必须让 CI 感知。原实现返回空 checks，
     # main 会 0 检查全"通过"并以退出码 0 结束——门禁形同虚设。
     raise ValueError(f"冒烟配置格式非法（顶层须为 list 或 {{'checks': [...]}}）: {path}")
@@ -121,7 +211,11 @@ def run_check(check: CheckConfig, base_url: str | None, default_timeout: float) 
     # 注意：timeout 原样透传给 urlopen，若 JSON 里写成字符串 "5" 会被当作非数值触发 TypeError；
     # 配置应保证为数字，本函数不做强制转换（cast 仅为类型检查，不改运行时值）。
     timeout = cast(float, check.get("timeout", default_timeout))
-    headers_raw = cast(dict[str, object], check.get("headers", {}))
+    # M-32② 配套：load_config 已保证 headers 存在时必为 object，且刻意放行显式 null（与
+    # 不写等价）。此处必须用 `or {}` 而不是只靠默认值 —— dict.get 的默认值只在**键缺失**时
+    # 生效，键在而值为 null 时返回 None，`None.items()` 又是 AttributeError（rc=1），
+    # 等于在校验放行后重新开一个同族崩口。`expect_contains` 下方早就是同一形态（`or []`）。
+    headers_raw = cast(dict[str, object], check.get("headers") or {})
     headers: dict[str, str] = {k: str(v) for k, v in headers_raw.items()}
     body = check.get("body")
     # dict/list 请求体按 JSON 序列化并设置 Content-Type（setdefault 不覆盖调用方已指定的类型）；
@@ -354,6 +448,8 @@ def main() -> None:
         checks, cfg_base = load_config(config_path)
     except (OSError, ValueError) as e:
         # 配置读取/格式错误退出码 2，与「检查失败(1)」区分，便于 CI 分辨是脚本/配置问题还是接口问题
+        # M-32②：load_config 现在对**任意**形态畸形都抛 ValueError（不再留 AttributeError 给
+        # run_check 崩栈），故这里的 2 是「配置问题」的唯一出口，本 except 元组不得缩窄。
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)
     base_url = base_url_arg or cfg_base

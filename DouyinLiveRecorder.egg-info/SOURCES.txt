@@ -43,6 +43,7 @@ src/utils.py
 src/video_postprocess.py
 src/web_api.py
 src/web_config.py
+src/web_models.py
 src/web_tray.py
 src/ws_client.py
 src/javascript/crypto-js.min.js
@@ -163,6 +164,7 @@ tests/test_utils.py
 tests/test_video_postprocess.py
 tests/test_video_postprocess_paths.py
 tests/test_web_api.py
+tests/test_web_api_routes.py
 tests/test_web_config.py
 tests/test_web_config_locks.py
 tests/test_web_config_secret_mask.py

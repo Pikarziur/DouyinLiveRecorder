@@ -4947,7 +4947,16 @@ def main(non_interactive: bool = False) -> None:
         danmaku_platforms_str = read_config_value(
             config, "录制设置", "弹幕录制平台(逗号分隔)", "斗鱼直播,B站直播,虎牙直播,抖音直播,TwitchTV"
         )
-        danmaku_platforms = danmaku_platforms_str.replace("，", ",").split(",") if danmaku_platforms_str else []
+        # M-12 修复（2026-09-29 审查）：分割后逐项 strip 并丢弃空项，口径与上方「HLS采集排除平台」
+        # （hls_collection_exclude_platforms）完全一致。原写法 replace 全角逗号后直接 split(",")，
+        # 用户在面板/GUI 里最常见的 `"斗鱼直播, B站直播"` 会得到 `" B站直播"`，而匹配点
+        # `platform in danmaku_platforms`（见本文件 _danmaku_active 分支）按平台名精确比较 → 恒不命中，
+        # 该平台弹幕被**静默**关闭（无一条日志），表现为「配置勾了却没弹幕」。
+        danmaku_platforms = (
+            [p.strip() for p in danmaku_platforms_str.replace("，", ",").split(",") if p.strip()]
+            if danmaku_platforms_str
+            else []
+        )
         enable_proxy_platform_list = (
             enable_proxy_platform.replace("，", ",").split(",") if enable_proxy_platform else None
         )

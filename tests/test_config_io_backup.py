@@ -3,7 +3,9 @@
 import configparser
 import os
 import sys
+import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 from loguru import logger
@@ -11,7 +13,20 @@ from loguru import logger
 # config_io 顶层 `import main`，而 main 又反向导入 config_io；
 # 必须让 main 先进入 sys.modules 才能打破这个导入环。
 import main  # noqa: E402,F401
+from src import config_io  # noqa: E402
 from src.config_io import backup_file  # noqa: E402
+
+
+def _os_shim(**overrides: Any) -> types.SimpleNamespace:
+    # M-27（CODE_REVIEW_2026-09-29_2）：不得 `monkeypatch.setattr(os, "remove", 替身)`——
+    # monkeypatch 解析到的是**全进程唯一**的 os 模块本体，替身窗口内 loguru 的轮转删除、
+    # 其他后台线程的重命名会一并被换成 no-op（本文件 L39 的替身正是「只记账不删除」）。
+    # 仓库约定（AGENTS「测试编写强制约定」+ tests/test_test_hygiene.py R1）：浅拷贝一份命名空间，
+    # 只替换需要的那 1~2 个属性，再把替身绑到**被测模块自己的 os 引用**上（其余属性仍是真实现）。
+    shim = types.SimpleNamespace(**vars(os))
+    for name, value in overrides.items():
+        setattr(shim, name, value)
+    return shim
 
 
 def _seed_backups(backup_dir: str, prefix: str, count: int) -> None:
@@ -36,7 +51,12 @@ def test_rotation_deletes_excess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     _seed_backups(str(backup_dir), prefix, seed)
 
     calls: list[str] = []
-    monkeypatch.setattr(os, "remove", lambda p: calls.append(p))
+    real_remove = os.remove
+    # 只替换 config_io 命名空间里的 os.remove，进程其余部分（loguru / 其他后台线程）不受影响
+    monkeypatch.setattr(config_io, "os", _os_shim(remove=lambda p: calls.append(p)))
+    # M-27 回归锁：替身必须只落在被测模块的命名空间里。恢复成 `setattr(os, "remove", ...)`
+    # （全进程唯一 os 本体）时，紧跟着这一行就会变红。
+    assert os.remove is real_remove
 
     backup_file(str(source), str(backup_dir), limit_counts=limit)
     # 旋转尝试删除的次数 = (已有 + 新生成) - 上限
@@ -63,7 +83,12 @@ def test_rotation_delete_failure_is_best_effort(tmp_path: Path, monkeypatch: pyt
         calls.append(p)
         _raise()
 
-    monkeypatch.setattr(os, "remove", _remove_and_raise)
+    # M-27：同样只替换 config_io 命名空间的 os.remove——本用例要的正是「删除抛 OSError」这一条
+    # 分支，替身挂在被测模块上即可精确命中，不会把全进程的删除都变成抛异常。
+    real_remove = os.remove
+    monkeypatch.setattr(config_io, "os", _os_shim(remove=_remove_and_raise))
+    # 回归锁同 test_rotation_deletes_excess：进程全局 os.remove 不得在替身窗口内被换掉
+    assert os.remove is real_remove
 
     captured: list[str] = []
     handler_id = logger.add(lambda msg: captured.append(str(msg)), level="WARNING")

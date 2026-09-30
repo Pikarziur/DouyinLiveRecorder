@@ -1,5 +1,5 @@
 # src/web_api.py
-# Web 管理面板 FastAPI 应用：认证、路由、静态资源。
+# Web 管理面板 Starlette 应用：认证、路由、静态资源。
 #
 # 鉴权模型总览（web_api 与 web/ 前端共用）：
 # ① 认证开关：config.ini [Web].web_auth_enable=true 时开启；关闭时所有 /api/* 公开访问（局域网用）
@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import inspect
 import json
 import os
 import re
@@ -72,11 +73,124 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from starlette.responses import Response
+from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.staticfiles import StaticFiles
+
+from src.web_models import (
+    ConfigUpdate,
+    LanguageUpdate,
+    LoginRequest,
+    QualityOptionsUpdate,
+    RecordingToggle,
+    RoomCreate,
+    RoomQualityUpdate,
+    RoomToggle,
+    RoomUpdate,
+)
+
+# ─── Starlette 接线层（阶段 2：FastAPI → Starlette）────────────────────────────
+# Starlette 不提供 FastAPI 的参数注入（模型自动解析 / Query 自动绑定 / dict→JSON 自动序列化），
+# 这里用 `_route` 装饰器复刻等价语义：① JSON body 解析成 web_models dataclass 作为模型参数；
+# ② 查询串按默认值回填、按上下界夹取；③ 同步 def 端点经 run_in_threadpool 派发到线程池
+# （与 FastAPI 行为一致，避免阻塞事件循环）；④ 非 Response 返回值统一包成 JSONResponse。
+# 业务逻辑与旧实现逐字一致，仅搬运到 Starlette 接线；安全不变量（MID-*/SEV-*）不受影响。
+_BODY_MODELS = {
+    LoginRequest,
+    RoomCreate,
+    RoomUpdate,
+    RoomToggle,
+    RoomQualityUpdate,
+    QualityOptionsUpdate,
+    RecordingToggle,
+    ConfigUpdate,
+    LanguageUpdate,
+}
+
+# 查询参数的默认值与上下界，复刻 FastAPI Query(default, ge=, le=) 的契约。
+# 上下界必须为 int | None：夹取走 max/min 数值比较，声明成 object 会让 mypy 无法解析重载。
+_QUERY_DEFAULTS: dict[str, dict[str, tuple[object, int | None, int | None]]] = {
+    "delete_room": {"url": ("", None, None)},
+    "list_files": {"path": ("", None, None)},
+    "download_file": {"path": ("", None, None)},
+    "get_logs": {"lines": (200, 1, 5000)},
+    "get_danmaku": {"since": (0, 0, None)},
+}
+
+
+async def _read_json_body(request: Request) -> object:
+    # 解析 JSON 请求体；非法/空体统一转 422（对齐旧 pydantic 的 422 契约）。
+    # 仅当端点有模型参数时适配器才会调用，GET/无 body 端点不会走到这里。
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="请求体不是合法 JSON")
+
+
+def _route(app: Starlette, methods: list[str], path: str) -> Callable[[Callable[..., object]], Callable[..., object]]:
+    # 装饰器工厂：把 FastAPI 风格的端点（模型参数 / Query 参数 / dict→JSON 返回）适配到 Starlette。
+    def _decorator(handler: Callable[..., object]) -> Callable[..., object]:
+        sig = inspect.signature(handler, eval_str=True)
+        params = sig.parameters
+        is_async = inspect.iscoroutinefunction(handler)
+        model_param: str | None = None
+        query_names: list[str] = []
+        takes_request = False
+        for name, p in params.items():
+            if name == "request":
+                takes_request = True
+            elif p.annotation in _BODY_MODELS:
+                model_param = name
+            else:
+                query_names.append(name)
+
+        async def _adapter(request: Request) -> Response:
+            kwargs: dict[str, object] = {}
+            if model_param is not None:
+                payload = await _read_json_body(request)
+                model_cls = params[model_param].annotation
+                try:
+                    kwargs[model_param] = model_cls.parse(payload)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc))
+            for qname in query_names:
+                default, lo, hi = _QUERY_DEFAULTS.get(handler.__name__, {}).get(qname, ("", None, None))
+                raw = request.query_params.get(qname)
+                if raw is None or raw == "":
+                    value: object = default
+                elif isinstance(default, int):
+                    try:
+                        value = int(raw)
+                    except ValueError:
+                        value = default
+                else:
+                    value = raw
+                if isinstance(value, int):
+                    if lo is not None:
+                        value = max(lo, value)
+                    if hi is not None:
+                        value = min(hi, value)
+                kwargs[qname] = value
+            if takes_request:
+                kwargs["request"] = request
+            if is_async:
+                # handler 统一声明为 Callable[..., object]，异步分支按运行时判定收窄为可 await 形态
+                result = await cast(Callable[..., Awaitable[object]], handler)(**kwargs)
+            else:
+                result = await run_in_threadpool(handler, **kwargs)
+            if isinstance(result, Response):
+                return result
+            return JSONResponse(result)
+
+        app.add_route(path, _adapter, methods=methods)
+        return handler
+
+    return _decorator
+
 
 from src.web_config import (
     BUILTIN_QUALITIES,
@@ -287,7 +401,7 @@ def _insecure_bind_detail(context: str, action: str, bind_host: str) -> str:
     )
 
 
-def _guard_bind_host(app: FastAPI, cfg: dict[str, str | int | bool]) -> str:
+def _guard_bind_host(app: Starlette, cfg: dict[str, str | int | bool]) -> str:
     # SEV-N03：安全判定的「监听地址」基准。首选 create_app 传入的**实际绑定地址**（web.py 已接线），
     # 只有「调用方未接线」（bind_host is None）才回落到配置值，三条理由：
     # ① 既有调用点（tests/ 多处直接构造 app、第三方复用 create_app 的代码）不传该参数，若默认按
@@ -302,7 +416,7 @@ def _guard_bind_host(app: FastAPI, cfg: dict[str, str | int | bool]) -> str:
     return str(cast(object, cfg.get("web_host", "")) or "")
 
 
-def _guard_bind_port(app: FastAPI) -> int:
+def _guard_bind_port(app: Starlette) -> int:
     # SEV-N03 / MID-N42：端口与地址同判——web_port 同样可经 PUT /api/config 改写，而进程监听端口
     # 直到重启才会变；Origin 同源判定要靠端口区分「本站页面」与「本机/局域网里另一台服务器上的
     # 页面」，故基准也必须取实际绑定值。返回 0 表示「调用方未接线」，由 web_config.is_origin_allowed
@@ -312,10 +426,6 @@ def _guard_bind_port(app: FastAPI) -> int:
 
 
 # app.state 上的自定义属性由 Starlette 动态承载（类型化为 Any），读取处统一用 cast 收敛类型。
-class LoginRequest(BaseModel):
-    password: str
-
-
 def _trusted_proxy_set(cfg: dict[str, str | int | bool]) -> set[str]:
     return {h.strip() for h in str(cast(str, cfg.get("web_trusted_proxy", ""))).split(",") if h.strip()}
 
@@ -341,61 +451,6 @@ def _get_client_ip(request: Request, cfg: dict[str, str | int | bool]) -> str:
         if hop not in trusted:
             return hop
     return peer
-
-
-class RoomCreate(BaseModel):
-    url: str
-    quality: str | None = None
-    name: str | None = None
-
-
-class RoomUpdate(BaseModel):
-    old_url: str
-    url: str
-    quality: str | None = None
-    name: str | None = None
-
-
-class RoomToggle(BaseModel):
-    url: str
-    enable: bool
-
-
-class RoomQualityUpdate(BaseModel):
-    # 按房间切换画质：quality 为 None/空串表示移除画质段（回落全局默认画质），
-    # 非空时必须是内置档位（白名单外的名称会被录制引擎静默回退成「原画」）
-    url: str
-    quality: str | None = None
-
-
-class QualityOptionsUpdate(BaseModel):
-    # 画质选项列表（WEB 下拉与 GUI 切换菜单共用，落地 config.ini [录制设置]）
-    options: list[str]
-
-
-class RecordingToggle(BaseModel):
-    enable: bool
-
-
-class ConfigUpdate(BaseModel):
-    section: str
-    key: str
-    value: str
-    # MID-2241（2026-09-23 后端落地）：`[Web] web_auth_enable` / `web_password` 两项是「面板信任
-    # 边界本身」的开关——一次 PUT 即可关掉认证（回环绑定下 SEV-04 不拦）或改写口令（连带
-    # _tokens.clear() 踢掉全部会话）。持（或被窃）bearer 的一方由此把「需要凭据的面板」降级成
-    # 「本机/局域网任意进程可操控的面板」，且该降级不随 token 吊销回滚。
-    # 其余配置键**不接受**本字段参与判定：请求体不带该字段时，其余键的写入语义与修复前逐字一致
-    # （前端也刻意只在认证两键被确认后才附上它，见 tests/frontend/test_quality_ui.mjs 的 deepEqual 锁）。
-    # [历史注] 2026-09-22 只落前端 confirm（web/app.js::saveConfig），后端曾以「与 tests/
-    # test_web_api.py 的 10 个既有用例冲突」为由不做判定；该理由不成立——打红那些用例的是
-    # **无条件**要求复验（连认证已关闭、根本没有口令可验的场景一起打死）。判据见 update_config 内
-    # MID-2241 段（认证开启 ⇒ 必须携带能验过的 reauth_password，否则 403）。
-    reauth_password: str | None = None
-
-
-class LanguageUpdate(BaseModel):
-    language: str
 
 
 def _read_app_version() -> str:
@@ -427,8 +482,8 @@ def create_app(
     logs_dir: str,
     bind_host: str | None = None,
     bind_port: int | None = None,
-) -> FastAPI:
-    # 创建 FastAPI 应用。参数显式传入（而非读全局），便于测试时指向临时文件；
+) -> Starlette:
+    # 创建 Starlette 应用。参数显式传入（而非读全局），便于测试时指向临时文件；
     # version 由 _APP_VERSION 在运行时从 pyproject.toml 动态提供，避免硬编码。
     #
     # SEV-N03（2026-09-21）：bind_host / bind_port = **进程实际监听**的地址与端口，由 web.py 把它
@@ -438,7 +493,18 @@ def create_app(
     # 让仍监听 0.0.0.0 的进程变成「无认证 + 全网卡」——判定基准由请求方可写，防线形同不存在
     # （详见 web_config 的 MID-N42 段）。判定一律以本处传入的实际绑定地址为准；config 里的
     # web_host 只在「调用方未接线」时作回落值，理由见 _guard_bind_host。
-    app = FastAPI(title="DouyinLiveRecorder Web Panel", version=_APP_VERSION)
+    app = Starlette()
+
+    # FastAPI 对端点内 raise HTTPException 的默认响应是 JSONResponse({"detail": ...})，而 Starlette
+    # 的内建 handler 回 PlainTextResponse(detail)——正文变成裸字符串，前端 apiError() 读不到
+    # detail 键，24 条路由的错误契约随之漂移。这里按 FastAPI 语义显式注册 JSON handler；
+    # headers 透传保留 raise 时附带的 Retry-After 等（WebAuth 限流路径在用）。
+    async def _http_exception_to_json(request: Request, exc: Exception) -> JSONResponse:
+        # Starlette 异常处理协议要求形参收宽为 Exception；按注册键分发，运行期必为 HTTPException
+        http_exc = cast(HTTPException, exc)
+        return JSONResponse({"detail": http_exc.detail}, status_code=http_exc.status_code, headers=http_exc.headers)
+
+    app.add_exception_handler(HTTPException, _http_exception_to_json)
 
     # 将路径与配置存入 app.state，路由通过 request.app.state 访问
     # 写入处用 setattr 避免对已类型化为 Any 的 app.state 触发 reportAny。
@@ -461,12 +527,14 @@ def create_app(
     # MID-34 的刻意例外：本中间件仍留在事件循环里——每请求只做一次 os.stat（O(1)），只有配置真的
     # 变化时才走一次 configparser 全量解析（~1ms/150 行）；把它也挪进线程池会让**每个**请求多一次
     # 线程派发，反而比它要防的问题更贵。写侧的安全敏感变化另由 _invalidate_web_cfg_cache 兜住。
-    @app.middleware("http")
+    # Starlette 没有 FastAPI 的 @app.middleware("http") 装饰器方法（迁移初稿误判为「Starlette 原生
+    # 支持」，mypy attr-defined + 运行期导入即抛 AttributeError 双重证伪）；FastAPI 该装饰器的底层
+    # 实现就是 add_middleware(BaseHTTPMiddleware, dispatch=func)，此处按同一语义显式注册。
     async def auth_middleware(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        cfg = _read_web_config_cached(cast(str, cast(FastAPI, request.app).state.config_file))
+        cfg = _read_web_config_cached(cast(str, cast(Starlette, request.app).state.config_file))
         # WD-09：顺带回收过期 token。原实现只在 login 路径清理，长期运行后过期条目
         # 要等下一次登录才回收，token 表随之缓慢增长。
         _purge_expired_tokens()
@@ -573,9 +641,13 @@ def create_app(
         )
         return response
 
+    # add_middleware 只能在应用开始处理请求之前调用（create_app 返回前即注册）；
+    # lifespan 启动后再调用会抛 RuntimeError。
+    app.add_middleware(BaseHTTPMiddleware, dispatch=auth_middleware)
+
     # ===== 路由 =====
 
-    @app.post("/api/login")
+    @_route(app, ["POST"], "/api/login")
     def login(req: LoginRequest, request: Request) -> dict[str, object]:
         # MID-34/35：本端点刻意声明为**同步 def**——FastAPI 会把同步端点派发到 anyio 线程池，于是下面的
         # read_web_config（磁盘）、PBKDF2 校验（约 150ms CPU）、首次登录的哈希升级写盘（持
@@ -645,7 +717,7 @@ def create_app(
             _tokens[token] = expiry
         return {"token": token, "expires_in": expires_in}
 
-    @app.post("/api/logout")
+    @_route(app, ["POST"], "/api/logout")
     def logout(request: Request) -> dict[str, object]:
         # WD-09 修复：原实现没有注销端点——前端登出只清 localStorage，服务端 token 在
         # web_token_expiry（默认 86400s）内依旧完全有效，泄露的 token 无法单独吊销，
@@ -656,7 +728,7 @@ def create_app(
                 _ = _tokens.pop(auth[7:], None)
         return {"ok": True}
 
-    @app.get("/api/status")
+    @_route(app, ["GET"], "/api/status")
     async def get_status() -> dict[str, object]:
         # MID-34：唯一保持 async 的数据端点——它需要 asyncio.wait_for 的超时语义。
         # 阻塞采样在专用线程里跑，超时则回退到陈旧快照并置 stale:true，
@@ -670,7 +742,7 @@ def create_app(
     # （/api/login 在认证关闭时也会经此契约告知前端放行）。故意不走 Bearer 校验——登录前拿不到 token。
     # MID-34：同步 def —— read_web_config 是全量 configparser.read（磁盘 IO），async def 下它会在
     # 事件循环线程里执行，与 /api/status 同属一类停摆源。
-    @app.get("/api/auth/status")
+    @_route(app, ["GET"], "/api/auth/status")
     def auth_status() -> dict[str, object]:
         # MIN-2245（2026-09-22）：本端点免鉴权，旧写法仍每请求做一次全量 configparser 解析（WD-06 的
         # mtime+size 缓存当时只挂在中间件上）→ 能访问端口即可低成本把读盘放大为磁盘 IO 压力，而这正是
@@ -688,11 +760,11 @@ def create_app(
     # 平台接口等外部依赖——那些不健康时面板仍应可访问（用户需进面板改配置），把它们纳入探活只会让
     # 门禁误红。字段为对外契约：scripts/smoke_web.json 与 CI 冒烟步骤按 {"status": "ok"} 断言，
     # 新增字段可以、改名或改值不行。
-    @app.get("/health")
+    @_route(app, ["GET"], "/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": _APP_VERSION}
 
-    @app.get("/api/status/stream")
+    @_route(app, ["GET"], "/api/status/stream")
     async def status_stream(request: Request) -> StreamingResponse:
         # 2026-09-12 修复（CODE_REVIEW_FIX_1 F-20）：消除「慢速占用面」。原实现 `while True` 无客户端
         # 断开检测——连接一旦建立就永不释放，每 2 秒轮询一次 main.get_status()（内含锁与字典拷贝）；
@@ -723,7 +795,7 @@ def create_app(
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
-    @app.post("/api/recording/toggle")
+    @_route(app, ["POST"], "/api/recording/toggle")
     def toggle_recording(req: RecordingToggle) -> dict[str, object]:
         # Web 面板「开始/停止录制」按钮的后端：切换全局录制开关 main.recording_enabled。
         # 开启 → 主循环下一轮（≤3s）自动拉起全部已配置房间线程；
@@ -741,7 +813,7 @@ def create_app(
             _ = archive_runtime_logs(reopen_streams=True)
         return {"ok": True, "recording_enabled": req.enable}
 
-    @app.get("/api/rooms")
+    @_route(app, ["GET"], "/api/rooms")
     def list_rooms() -> list[dict[str, str | bool]]:
         # MID-34：同步 def（走 FastAPI 线程池）——整文件读 + 抢 record_state_lock。
         rooms = parse_url_config(cast(str, app.state.url_config_file))
@@ -759,7 +831,7 @@ def create_app(
             r["recording"] = any(r["url"] == u for u in running)
         return rooms
 
-    @app.post("/api/rooms")
+    @_route(app, ["POST"], "/api/rooms")
     def add_room(req: RoomCreate) -> dict[str, object]:
         # MID-34：同步 def —— validate_room_target 会做 DNS 解析（SEV-03），
         # 落盘又是整文件读 + os.replace；放在事件循环里会让一个慢域名卡死整个面板。
@@ -818,7 +890,7 @@ def create_app(
                 _ = f.write(("\n" if _needs_newline else "") + line + "\n")
         return {"ok": True}
 
-    @app.put("/api/rooms")
+    @_route(app, ["PUT"], "/api/rooms")
     def update_room(req: RoomUpdate) -> dict[str, object]:
         # SEV-02 主修复：本端点此前**完全不做**房间校验（POST 与 PUT/quality 都做），于是它成为绕过
         # SSRF/任意 scheme/画质白名单的第二条写入口。校验现已下沉进 format_url_line（唯一写入口），
@@ -866,8 +938,8 @@ def create_app(
             raise HTTPException(404, "未找到原直播间")
         return {"ok": True}
 
-    @app.delete("/api/rooms")
-    def delete_room(url: str = Query(...)) -> dict[str, object]:
+    @_route(app, ["DELETE"], "/api/rooms")
+    def delete_room(url: str = "") -> dict[str, object]:
         url = normalize_url(url)
         import main as _main
 
@@ -890,7 +962,7 @@ def create_app(
                     return {"ok": True}
         raise HTTPException(404, "未找到直播间")
 
-    @app.post("/api/rooms/toggle")
+    @_route(app, ["POST"], "/api/rooms/toggle")
     def toggle_room(req: RoomToggle) -> dict[str, object]:
         url = normalize_url(req.url)
         import main as _main
@@ -921,7 +993,7 @@ def create_app(
 
     # 按房间切换画质：与 GUI 画质监控页「切换画质」菜单共用 update_room_quality 落盘
     # （「画质,URL,主播: 名称」行格式），下一轮检测循环生效；两端的切换互相同步。
-    @app.put("/api/rooms/quality")
+    @_route(app, ["PUT"], "/api/rooms/quality")
     def change_room_quality(req: RoomQualityUpdate) -> dict[str, object]:
         url = normalize_url(req.url)
         quality = (req.quality or "").strip()
@@ -946,7 +1018,7 @@ def create_app(
 
     # 画质选项：WEB 直播间设置的画质下拉与 GUI 画质监控的切换菜单共用同一份列表，
     # 落地 config.ini [录制设置]/自定义画质选项(逗号分隔)，保证两端选项一致。
-    @app.get("/api/rooms/qualities")
+    @_route(app, ["GET"], "/api/rooms/qualities")
     def list_quality_options() -> dict[str, object]:
         # builtin 一并返回，前端「添加画质」候选列表不必再硬编码一份档位名
         return {
@@ -954,7 +1026,7 @@ def create_app(
             "builtin": list(BUILTIN_QUALITIES),
         }
 
-    @app.put("/api/rooms/qualities")
+    @_route(app, ["PUT"], "/api/rooms/qualities")
     def update_quality_options(req: QualityOptionsUpdate) -> dict[str, object]:
         try:
             validate_config_target(QUALITY_OPTIONS_SECTION, QUALITY_OPTIONS_KEY, ",".join(req.options))
@@ -968,12 +1040,12 @@ def create_app(
             options = write_quality_options(cast(str, app.state.config_file), req.options)
         return {"ok": True, "options": options}
 
-    @app.get("/api/config")
+    @_route(app, ["GET"], "/api/config")
     def get_config() -> dict[str, dict[str, str]]:
         # MID-34：同步 def（走线程池）——read_config_safe 是全量 configparser 解析。
         return read_config_safe(cast(str, app.state.config_file))
 
-    @app.put("/api/config")
+    @_route(app, ["PUT"], "/api/config")
     def update_config(req: ConfigUpdate) -> dict[str, object]:
         # 2026-09-12 审查 C-1：Pydantic 默认不 strip 字段，key 首尾空白可绕过黑名单的精确匹配、而
         # web_config 行匹配正则的 \s* 仍命中真实配置行（前缀捕获含尾空白），构成未认证 RCE；判定与
@@ -1167,7 +1239,7 @@ def create_app(
             _invalidate_web_cfg_cache()
         return {"ok": True}
 
-    @app.get("/api/language")
+    @_route(app, ["GET"], "/api/language")
     def get_language() -> dict[str, object]:
         # 当前语言 + 受支持语言列表（供前端语言选择器渲染）
         import i18n as i18n_module
@@ -1177,7 +1249,7 @@ def create_app(
             "available": i18n_module.available_languages(),
         }
 
-    @app.put("/api/language")
+    @_route(app, ["PUT"], "/api/language")
     def set_language(req: LanguageUpdate) -> dict[str, object]:
         # 即时切换语言：归一化校验 → **先**热切换本进程翻译目录 → 按**实际生效**的语言码写回 config.ini。
         # 本进程（uvicorn 与录制守护线程同进程）后续控制台/日志输出即时使用新语言；
@@ -1223,8 +1295,8 @@ def create_app(
             ),
         }
 
-    @app.get("/api/files")
-    def list_files(path: str = Query("")) -> list[dict[str, str | int | float]]:
+    @_route(app, ["GET"], "/api/files")
+    def list_files(path: str = "") -> list[dict[str, str | int | float]]:
         # MID-34：同步 def（FastAPI 自动派发到 anyio 线程池）——本端点对目录逐项
         # realpath + os.stat，大录像目录/慢盘下是纯阻塞调用。
         root = cast(str, app.state.downloads_root)
@@ -1270,16 +1342,16 @@ def create_app(
             )
         return items
 
-    @app.get("/api/files/download")
-    def download_file(path: str = Query(...)) -> FileResponse:
+    @_route(app, ["GET"], "/api/files/download")
+    def download_file(path: str = "") -> FileResponse:
         root = cast(str, app.state.downloads_root)
         target = os.path.realpath(os.path.join(root, path))
         if not _is_within(target, root) or not os.path.isfile(target):
             raise HTTPException(400, "非法路径或文件不存在")
         return FileResponse(target, filename=os.path.basename(target))
 
-    @app.get("/api/logs")
-    def get_logs(lines: int = Query(200, ge=1, le=5000)) -> dict[str, list[str]]:
+    @_route(app, ["GET"], "/api/logs")
+    def get_logs(lines: int = 200) -> dict[str, list[str]]:
         log_file = os.path.join(cast(str, app.state.logs_dir), "streamget.log")
         if not os.path.isfile(log_file):
             return {"lines": cast(list[str], [])}
@@ -1295,8 +1367,8 @@ def create_app(
             _log_internal_error(_LOGS_ERROR_CODE, e)
             raise HTTPException(500, _LOGS_ERROR_CODE) from e
 
-    @app.get("/api/danmaku")
-    def get_danmaku(since: int = Query(0, ge=0)) -> dict[str, object]:
+    @_route(app, ["GET"], "/api/danmaku")
+    def get_danmaku(since: int = 0) -> dict[str, object]:
         # 弹幕监控快照：rooms 为各房间统计，messages 为 seq 游标之后的增量消息。
         # 与录制引擎同进程，直接读 DanmakuMonitorHub 内存快照；异常时返回空快照而非 500，
         # 避免面板因监控旁路故障整页报错。
@@ -1314,7 +1386,7 @@ def create_app(
     if _WEB_DIR.exists():
         app.mount("/web", StaticFiles(directory=str(_WEB_DIR), html=True), name="web")
 
-        @app.get("/")
+        @_route(app, ["GET"], "/")
         async def index() -> FileResponse:
             return FileResponse(str(_WEB_DIR / "index.html"))
 

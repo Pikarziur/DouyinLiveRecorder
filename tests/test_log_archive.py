@@ -99,6 +99,11 @@ class TestArchiveRuntimeLogs:
         self, logs_dir: Path, fake_sink_ops: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # 单文件改名失败（如句柄被第三方进程占用）仅告警跳过，其余文件照常归档且不抛异常
+        # M-27（CODE_REVIEW_2026-09-29_2）：原写法 `monkeypatch.setattr(os, "rename", ...)` 改的是
+        # **全进程唯一**的 os 模块本体——替身窗口内 loguru 的文件轮转改名、弹幕边车、GUI/录制后台
+        # 线程的 rename 全部一并命中「遇 PlayURL.log 就抛 PermissionError」这条规则，属跨用例竞态源。
+        # 本文件对 datetime 早已采用「浅拷贝 + 只换被测模块命名空间引用」的正确形态（见
+        # test_target_conflict_appends_sequence），os 按同一口径收口。
         real_rename = os.rename
 
         def fake_rename(src: str, dst: str) -> None:
@@ -106,7 +111,10 @@ class TestArchiveRuntimeLogs:
                 raise PermissionError(32, "模拟句柄被占用")
             real_rename(src, dst)
 
-        monkeypatch.setattr(os, "rename", fake_rename)
+        monkeypatch.setattr(la, "os", types.SimpleNamespace(**{**vars(os), "rename": fake_rename}))
+        # M-27 回归锁：替身只落进 src.log_archive 的命名空间；进程全局 os.rename 必须仍是真实现。
+        # 恢复成 `monkeypatch.setattr(os, "rename", ...)` 形态时，这一行当场变红。
+        assert os.rename is real_rename
         _touch(logs_dir, "streamget.log")
         _touch(logs_dir, "PlayURL.log")
         archived = la.archive_runtime_logs()

@@ -18,13 +18,22 @@
 # - 同一裸 ip:port 下同步选源与异步 get_response_status 必须得到同一 proxy 结论
 #   （判据用真实 httpx 各构造一次客户端来验契约，全程不发请求，仍不触网）。
 # ④ 机检类锁（不依赖执行）：MID-N32 的 url= 脱敏扫描、SEV-N05 的 proxy 归一 AST 扫描。
+# ⑤ WP-J（2026-09-30，方案 1-A）同步探针内网收口的**接线形态**锁：
+# - 两处自建探针客户端一律出自 _probe_client 工厂、且都带上恰一支 response 逐跳复检钩子
+#   （行为侧由 _ProxyContractClient 记录实参形状，结构侧由 AST 锁兜住「后来者只接一处」）；
+# - SEV-N05 的 proxy 归一判据随构造点收敛平移到「_probe_client 调用点的 proxy_addr 实参」，
+#   语义不变（值必须在同一作用域内、使用之前由 utils.handle_proxy_addr 得到）；
+# - 内网判定必须早于探针发出点、async_http 只能函数内 import（本仓存在 stream_select↔main 导入环）、
+#   内部控制流异常必须在每个「发探针 + except Exception」的 try 里排在宽 except 之前。
+# 判定链本身的正反用例（内网初始 URL / 公网→内网跳转 / 公网→公网反向锁 / 代理豁免 / 末位不放行）
+# 在 tests/test_sync_probe_internal_guard.py，不在本文件重复。
 
 from __future__ import annotations
 
 import ast
 import time
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal, TypeGuard
 from unittest.mock import patch
 
 import httpx
@@ -34,6 +43,7 @@ from loguru import logger
 import main  # noqa: F401  先完整初始化 main，打破 stream_select<->main 的循环导入
 import src.async_http as async_http
 import src.stream_select as ss
+from src import web_config
 from src.async_http import get_response_status
 from src.stream_select import (
     _hls_selection_config,
@@ -63,6 +73,25 @@ def no_probe_throttle(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     ss._probe_last_seen.clear()
     yield
     ss._probe_last_seen.clear()
+
+
+# 与 tests/test_regression_2026_09_29_wp_b_netguard.py / tests/test_regression_2026_09_22_net.py
+# 同一个公网解析结果（示例 IP，仅作 DNS seam 的返回值，不参与任何判定规则）。
+_PUBLIC_DNS_IP = "93.184.216.34"
+
+
+@pytest.fixture(autouse=True)
+def _stub_dns_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    # WP-J（2026-09-30，方案 1-A）之后，_validate_stream_url 的探针入口与交付 ffmpeg 前的落地复核
+    # 都会调 web_config._host_internal_reason，而它对**非 IP 字面量**的主机名要走 DNS seam
+    # _resolve_host_ips。本文件的用例地址是合成域名（x / a.cdn / dylive.rtmp.douyucdn.cn），真解析在
+    # 无外网/无 DNS 的环境里抛 OSError → 「主机名无法解析」→ 候选被判不可达，于是用例把「本机有没有
+    # DNS」当成了被测行为（无网 CI 上整片转红，且跨文件顺序相关）。
+    # 打桩口径沿用 async_http._internal_stream_target_reason 注释里写明的唯一 seam
+    # （monkeypatch src.web_config._resolve_host_ips），与上述两个既有文件同一处、同一个取值。
+    # 内网/保留目标类断言一律写成 IP 字面量——判定不依赖解析，也就不受本桩影响
+    # （专项用例见 tests/test_sync_probe_internal_guard.py）。
+    monkeypatch.setattr(web_config, "_resolve_host_ips", lambda host: [_PUBLIC_DNS_IP])
 
 
 _FLV_URL = "https://hw3.douyucdn2.cn/live/12828016rSWtjVdN.flv?wsAuth=abc&token=web-h5"
@@ -1396,14 +1425,30 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 class _ProxyContractClient:
     # 记录每支探针客户端收到的 proxy 实参，并立刻交给真实 httpx 判一次契约（构造后即关闭）。
     # HEAD 200 + mpegurl、正文为空 → _probe_hls_segment 解析不出分片、保守放行，故首候选即通过。
+    # WP-J（2026-09-30）：形参签名必须跟住 src/stream_select.py 的 _probe_client —— 它现在多传一个
+    # event_hooks（逐跳复检钩子）。这里既记录钩子条数（供「两处自建都挂上了钩子」的行为锁断言），
+    # 也把 event_hooks 一并交给**真实** httpx 构造：桩若把实参形状写错，真 httpx 会当场抛错，
+    # 契约仍由 httpx 本体判定、不在本文件自实现。
     proxies: list[str | None] = []
+    response_hook_counts: list[int] = []
     instantiated = 0
     close_calls = 0
 
-    def __init__(self, *, timeout: int = 10, proxy: str | None = None, verify: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: int = 10,
+        proxy: str | None = None,
+        verify: bool = True,
+        # 实参类型必须与 httpx.Client 的 event_hooks 声明兼容（typeshed 要 Mapping[str, list[Callable]]，
+        # 写 list[object] 会在下一行透传给真客户端时报 arg-type）；Any 只用于这一处打桩签名，
+        # 判据本身仍走 ast 收窄。
+        event_hooks: dict[str, list[Any]] | None = None,
+    ) -> None:
         _ProxyContractClient.instantiated += 1
         _ProxyContractClient.proxies.append(proxy)
-        real = _REAL_SYNC_CLIENT(timeout=timeout, proxy=proxy, verify=verify)
+        _ProxyContractClient.response_hook_counts.append(len((event_hooks or {}).get("response") or []))
+        real = _REAL_SYNC_CLIENT(timeout=timeout, proxy=proxy, verify=verify, event_hooks=event_hooks)
         real.close()
 
     def close(self) -> None:
@@ -1419,6 +1464,7 @@ class _ProxyContractClient:
 def _reset_proxy_contract_client() -> None:
     # 类级计数/记录会跨用例累积，逐用例显式重置（不复用其它用例的假客户端类，避免互相污染）
     _ProxyContractClient.proxies = []
+    _ProxyContractClient.response_hook_counts = []
     _ProxyContractClient.instantiated = 0
     _ProxyContractClient.close_calls = 0
 
@@ -1438,6 +1484,8 @@ def test_select_source_url_bare_proxy_addr_normalized_before_construct() -> None
     # AGENTS「探针客户端复用作用域 = 单次选源、finally 关闭」不得回退：一支、关一次
     assert _ProxyContractClient.instantiated == 1
     assert _ProxyContractClient.close_calls == 1
+    # WP-J：构造点收敛到 _probe_client 后，整轮共用客户端必须带上恰一支 response 逐跳复检钩子
+    assert _ProxyContractClient.response_hook_counts == [1], "select_source_url 的客户端未挂逐跳复检钩子"
 
 
 def test_select_source_url_empty_proxy_addr_becomes_none() -> None:
@@ -1451,6 +1499,8 @@ def test_select_source_url_empty_proxy_addr_becomes_none() -> None:
         result = select_source_url({"m3u8_url": _M3U8_URL, "flv_url": "", "record_url": ""}, "", "B站直播")
     assert result == _M3U8_URL
     assert _ProxyContractClient.proxies == [None]
+    # WP-J：整轮共用客户端（复用分支）同样必须带逐跳复检钩子
+    assert _ProxyContractClient.response_hook_counts == [1], "select_source_url 的客户端未挂逐跳复检钩子"
 
 
 def test_validate_stream_url_self_built_client_normalizes_proxy() -> None:
@@ -1460,6 +1510,8 @@ def test_validate_stream_url_self_built_client_normalizes_proxy() -> None:
         assert _validate_stream_url(_M3U8_URL, proxy_addr=_BARE_PROXY, last_resort=True) is True
     assert _ProxyContractClient.proxies == [_NORMALIZED_PROXY]
     assert _ProxyContractClient.close_calls == 1, "自建客户端由 owns_client 语义自行关闭"
+    # WP-J：自建分支也必须带恰一支 response 钩子（两处自建形态一致，漏一处即只接了一半）
+    assert _ProxyContractClient.response_hook_counts == [1], "_validate_stream_url 自建客户端未挂逐跳复检钩子"
 
 
 class _AlwaysFailingClient:
@@ -1546,6 +1598,11 @@ async def test_bare_proxy_addr_reaches_sync_and_async_probe_with_same_value() ->
 # 运行期断言只覆盖「探针客户端被真的构造」的调用形态；一旦有人把归一行整条删掉、或把某个新
 # 构造点写成裸传，而该路径当前没有运行期用例走到，锁就瞎了。AST 判据不依赖执行，直接把
 # 「每个 httpx.Client 构造点的 proxy= 都经 handle_proxy_addr」钉成机检。
+#   [WP-J 2026-09-30 形态变更] 两处裸 httpx.Client(...) 已收敛为 src/stream_select.py 的 _probe_client
+#   工厂（唯一的 httpx.Client 构造点）+ 两个调用点。归一约束随之从「构造点的 proxy=」平移到
+#   「_probe_client 调用点的 proxy_addr 实参」——语义完全等价（值仍必须在同一作用域内、使用之前由
+#   utils.handle_proxy_addr 得到），且工厂自身那次 httpx.Client(proxy=proxy_addr) 的 proxy 来自形参、
+#   由「调用点必须归一」间接保证，故工厂内不重复判（否则唯一合法构造会被误报）。
 def _is_handle_proxy_addr_call(node: ast.AST) -> bool:
     # 匹配 utils.handle_proxy_addr(...)：utils 经 `from src import utils` 模块级导入
     return (
@@ -1557,8 +1614,10 @@ def _is_handle_proxy_addr_call(node: ast.AST) -> bool:
     )
 
 
-def _is_httpx_client_call(node: ast.AST) -> bool:
-    # 匹配 httpx.Client(...) 构造（异步侧的 AsyncClient 不在本模块，不属本锁职责）
+def _is_httpx_client_call(node: ast.AST) -> TypeGuard[ast.Call]:
+    # 匹配 httpx.Client(...) 构造（异步侧的 AsyncClient 不在本模块，不属本锁职责）。
+    # 返回 TypeGuard 而不是 bool：收窄后 ast.walk 的产物可直接取 .keywords，判据仍由本函数
+    # 单点定义；写 bool 会逼每个调用点各补一遍 isinstance，反而多出三处可漂移的判据。
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -1566,6 +1625,22 @@ def _is_httpx_client_call(node: ast.AST) -> bool:
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "httpx"
     )
+
+
+def _is_probe_client_call(node: ast.AST) -> bool:
+    # 匹配 _probe_client(...)——WP-J 之后本模块探针客户端的唯一构造入口
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_probe_client"
+
+
+def _probe_client_proxy_argument(call: ast.Call) -> ast.expr | None:
+    # 取 _probe_client 调用点的 proxy 实参：本模块两处都按**位置**传（第 2 个形参 proxy_addr），
+    # 但关键字传法同样合法，两种都得认——只按 keyword 找会让位置实参悄悄逃过门禁（假绿）。
+    for keyword in call.keywords:
+        if keyword.arg == "proxy_addr":
+            return keyword.value
+    if len(call.args) >= 2:
+        return call.args[1]
+    return None
 
 
 def _scope_nodes(root: ast.AST) -> Iterator[ast.AST]:
@@ -1581,18 +1656,22 @@ def _scope_nodes(root: ast.AST) -> Iterator[ast.AST]:
             stack.append(child)
 
 
-def _unnormalized_proxy_constructions(src: str) -> tuple[list[int], int]:
-    # 返回 (违规构造点行号, 扫描到的 httpx.Client 构造总数)。判据：proxy= 实参要么内联
-    # utils.handle_proxy_addr(...)，要么是**同一作用域内、构造之前**由它赋过值的名字。
-    # 未传 proxy 的构造即直连，不构成违规（但会被总数计数暴露给调用方断言）。
+def _unnormalized_proxy_constructions(src: str) -> tuple[list[int], int, int]:
+    # 返回 (违规点行号, 扫描到的 httpx.Client 构造总数, 扫描到的 _probe_client 调用点总数)。
+    # 判据：proxy 实参要么内联 utils.handle_proxy_addr(...)，要么是**同一作用域内、使用之前**由它
+    # 赋过值的名字。未传 proxy 的构造即直连，不构成违规（但会被总数计数暴露给调用方断言）。
     offenders: list[int] = []
     total = 0
+    probe_calls_total = 0
     tree = ast.parse(src)
     scopes: list[ast.AST] = [tree]
     scopes.extend(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
     for scope in scopes:
+        # 工厂定义体内的 httpx.Client 只作计数、不作归一判定（理由见上方 WP-J 形态变更注）
+        in_factory = isinstance(scope, ast.FunctionDef) and scope.name == "_probe_client"
         normalized_at: dict[str, int] = {}
         constructions: list[ast.Call] = []
+        factory_uses: list[ast.Call] = []
         for node in _scope_nodes(scope):
             if isinstance(node, ast.Assign) and _is_handle_proxy_addr_call(node.value):
                 for target in node.targets:
@@ -1600,7 +1679,11 @@ def _unnormalized_proxy_constructions(src: str) -> tuple[list[int], int]:
                         normalized_at[target.id] = node.lineno
             elif isinstance(node, ast.Call) and _is_httpx_client_call(node):
                 constructions.append(node)
+            elif isinstance(node, ast.Call) and _is_probe_client_call(node):
+                factory_uses.append(node)
         for call in constructions:
+            if in_factory:
+                continue
             proxy_kw = next((kw for kw in call.keywords if kw.arg == "proxy"), None)
             if proxy_kw is None:
                 continue
@@ -1610,40 +1693,187 @@ def _unnormalized_proxy_constructions(src: str) -> tuple[list[int], int]:
             if isinstance(value, ast.Name) and normalized_at.get(value.id, 10**9) < call.lineno:
                 continue
             offenders.append(call.lineno)
+        for call in factory_uses:
+            # 变量名与上一循环的 value 分开：_probe_client_proxy_argument 的返回类型是
+            # ast.expr | None，复用同一个名字会让 mypy 按首循环的 ast.expr 收窄后报 assignment 冲突。
+            factory_value = _probe_client_proxy_argument(call)
+            if factory_value is None:
+                # 调用点没给 proxy 实参：本模块两处构造都**应当**显式透传归一后的代理地址，
+                # 漏写一律记违规（不得被「直连豁免」洗白）
+                offenders.append(call.lineno)
+                continue
+            if _is_handle_proxy_addr_call(factory_value):
+                continue
+            if isinstance(factory_value, ast.Constant) and factory_value.value is None:
+                continue  # 显式直连（字面量 None），不构成「裸传未归一的配置值」形态
+            if isinstance(factory_value, ast.Name) and normalized_at.get(factory_value.id, 10**9) < call.lineno:
+                continue
+            offenders.append(call.lineno)
         total += len(constructions)
-    return sorted(offenders), total
+        probe_calls_total += len(factory_uses)
+    return sorted(offenders), total, probe_calls_total
 
 
 def test_all_probe_client_constructions_normalize_proxy_addr() -> None:
     # ① 全文件机检：两处构造点都必须归一（新增第三处裸传即变红）
     src = _STREAM_SELECT_PATH.read_text(encoding="utf-8-sig")
-    offenders, total = _unnormalized_proxy_constructions(src)
+    offenders, total, probe_calls = _unnormalized_proxy_constructions(src)
     detail = ", ".join(f"src/stream_select.py:{ln}" for ln in offenders)
     assert (
         not offenders
-    ), f"以下 httpx.Client 构造点的 proxy= 未经 utils.handle_proxy_addr 归一（SEV-N05 回归）：{detail}"
+    ), f"以下 httpx.Client 构造点 / _probe_client 调用点的 proxy 未经 utils.handle_proxy_addr 归一（SEV-N05 回归）：{detail}"
     # 扫描面非空自检：总数为 0 说明判据失效（或构造被搬去别处），绿灯不能是「什么都没查」
-    assert total == 2, f"预期本模块恰有 2 处 httpx.Client 构造（选源共用 + 校验自建），实扫到 {total} 处"
+    # WP-J：httpx.Client 构造收敛为 _probe_client 内唯一一处；调用点必须是两处（选源共用 + 校验自建），
+    # 少一处即「另一处又变回裸构造」的静默漏接形态。
+    assert total == 1, f"预期本模块恰有 1 处 httpx.Client 构造（_probe_client 工厂内），实扫到 {total} 处"
+    assert probe_calls == 2, f"预期两处探针客户端都出自 _probe_client，实扫到 {probe_calls} 处调用"
+
+
+def test_probe_client_wiring_and_gate_coverage() -> None:
+    # ② WP-J 结构锁：两处自建 client 都挂上了逐跳钩子、且都过了初始 URL 内网判定（AST 断言，
+    # 防后来者只接一处）。判据全部取自生产代码的 AST，不在测试里重写一遍规则。
+    src = _STREAM_SELECT_PATH.read_text(encoding="utf-8-sig")
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    # (a) 唯一的 httpx.Client 构造必须落在 _probe_client 内，并带上 event_hooks={"response": [...]}
+    factory = funcs["_probe_client"]
+    constructions = [n for n in ast.walk(factory) if _is_httpx_client_call(n)]
+    assert len(constructions) == 1, "探针客户端构造必须收敛为 _probe_client 内唯一一处"
+    hook_kw = next((kw for kw in constructions[0].keywords if kw.arg == "event_hooks"), None)
+    assert hook_kw is not None, "_probe_client 未把 event_hooks 传给 httpx.Client（逐跳复检静默失效）"
+    hook_dict = hook_kw.value
+    assert isinstance(hook_dict, ast.Dict)
+    response_hooks: ast.expr | None = None
+    for key, value in zip(hook_dict.keys, hook_dict.values):
+        if isinstance(key, ast.Constant) and key.value == "response":
+            response_hooks = value
+    assert response_hooks is not None, "event_hooks 里没有 response 键（逐跳复检挂在别的钩子上＝没挂）"
+    assert isinstance(response_hooks, ast.List) and len(response_hooks.elts) == 1
+    guard_call = response_hooks.elts[0]
+    assert isinstance(guard_call, ast.Call) and isinstance(guard_call.func, ast.Name)
+    assert (
+        guard_call.func.id == "build_sync_hop_guard"
+    ), "response 钩子必须出自 async_http 的同步工厂 build_sync_hop_guard（判定只有一份事实源）"
+
+    # (b) 两处使用 client 的路径都在**发出第一个请求之前**过了初始 URL 内网判定：
+    #     · 自建分支（_validate_stream_url）：判定早于本函数内的第一次 client.head/get/stream
+    #     · 复用分支（select_source_url）：判定早于第一次把地址交给探针/ffmpeg 的 _validate_stream_url
+    #       与 _accept_source 调用点
+    _CLIENT_METHODS = {"head", "get", "stream"}
+    for name in ("_validate_stream_url", "select_source_url"):
+        body = funcs[name]
+        judged = [
+            n
+            for n in ast.walk(body)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("internal_stream_target_reason", "redirect_hop_rejection_reason")
+        ]
+        assert judged, f"{name} 内没有初始 URL 内网判定（internal_stream_target_reason）"
+        emitted = [
+            n
+            for n in ast.walk(body)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in _CLIENT_METHODS
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id in {"client", "probe_client"}
+        ] + [
+            n
+            for n in ast.walk(body)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_validate_stream_url"
+        ]
+        assert emitted, f"{name} 内找不到探针发出点，判据（判定必须早于探针）失效"
+        assert min(n.lineno for n in judged) < min(
+            n.lineno for n in emitted
+        ), f"{name}: 内网判定排在探针之后——被拒的地址已经发出去了"
+
+    # (c) 判定与钩子都来自 async_http 的同一份实现，且一律走**函数内 import**
+    #     （模块级出边会改变 stream_select↔main 这条既有导入环的初始化顺序，见 async_http.py:518-521）
+    assert not any(
+        isinstance(n, ast.ImportFrom) and (n.module or "").endswith("async_http") for n in tree.body
+    ), "stream_select 不得在模块级 import async_http（本仓存在 stream_select↔main 导入环）"
+    for name in ("_probe_client", "_validate_stream_url", "select_source_url", "_confirm_get_ok", "_probe_hls_segment"):
+        imports = [
+            n
+            for n in ast.walk(funcs[name])
+            if isinstance(n, ast.ImportFrom) and (n.module or "").endswith("async_http")
+        ]
+        assert imports, f"{name} 缺函数内 import from src.async_http"
+
+    # (d) 内部控制流异常必须在每个「发探针 + 用 except Exception 吞异常」的 try 里被单独放行，
+    #     且排在宽 except **之前**（Python 按顺序匹配处理器，写反了等于没写）——否则它会落进
+    #     except Exception 分支、被「维持 HEAD 结论 / 按列表可达 / 末位放行」的既有语义吃回去。
+    for name in ("_validate_stream_url", "_confirm_get_ok", "_probe_hls_segment"):
+        guarded = 0
+        for tr in [n for n in ast.walk(funcs[name]) if isinstance(n, ast.Try)]:
+            emits = [
+                n
+                for stmt in tr.body
+                for n in ast.walk(stmt)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr in _CLIENT_METHODS
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id in {"client", "probe_client"}
+            ]
+            kinds = [
+                h.type.id if isinstance(h.type, ast.Name) else "?"
+                for h in tr.handlers
+                if isinstance(h.type, (ast.Name, ast.Tuple))
+            ]
+            broad_at = next((i for i, k in enumerate(kinds) if k == "Exception"), None)
+            hop_at = next((i for i, k in enumerate(kinds) if k == "RedirectHopRejected"), None)
+            if emits and broad_at is not None:
+                guarded += 1
+                assert (
+                    hop_at is not None
+                ), f"{name}: 有一段既发探针又用 except Exception 吞异常的 try 没有 except RedirectHopRejected 分支"
+                assert hop_at < broad_at, f"{name}: except RedirectHopRejected 写在 except Exception 之后（永不命中）"
+        assert guarded >= 1, f"{name}: 判据没扫到任何「发探针且吞异常」的 try，本条锁已失效"
 
 
 def test_proxy_normalization_gate_predicate_sees_unnormalized_construction() -> None:
-    # ② 判据正/反向自检（防门禁自身假绿）：删掉归一行、归一发生在构造之后都必须被抓到；
+    # ③ 判据正/反向自检（防门禁自身假绿）：删掉归一行、归一发生在构造之后都必须被抓到；
     # 内联归一、构造前归一、以及不传 proxy 的直连构造不得误报
     bare = "def f(url, proxy_addr):\n    c = httpx.Client(timeout=5, proxy=proxy_addr, verify=True)\n"
-    assert _unnormalized_proxy_constructions(bare) == ([2], 1)
+    assert _unnormalized_proxy_constructions(bare) == ([2], 1, 0)
     too_late = (
         "def f(url, proxy_addr):\n"
         "    c = httpx.Client(proxy=proxy_addr)\n"
         "    proxy_addr = utils.handle_proxy_addr(proxy_addr)\n"
     )
-    assert _unnormalized_proxy_constructions(too_late) == ([2], 1)
+    assert _unnormalized_proxy_constructions(too_late) == ([2], 1, 0)
     inlined = "def f(url, proxy_addr):\n    c = httpx.Client(proxy=utils.handle_proxy_addr(proxy_addr))\n"
-    assert _unnormalized_proxy_constructions(inlined) == ([], 1)
+    assert _unnormalized_proxy_constructions(inlined) == ([], 1, 0)
     normalized_first = (
         "def f(url, proxy_addr):\n"
         "    proxy_addr = utils.handle_proxy_addr(proxy_addr)\n"
         "    c = httpx.Client(proxy=proxy_addr)\n"
     )
-    assert _unnormalized_proxy_constructions(normalized_first) == ([], 1)
+    assert _unnormalized_proxy_constructions(normalized_first) == ([], 1, 0)
     no_proxy = "def f(url):\n    c = httpx.Client(timeout=5, verify=True)\n"
-    assert _unnormalized_proxy_constructions(no_proxy) == ([], 1)
+    assert _unnormalized_proxy_constructions(no_proxy) == ([], 1, 0)
+    # WP-J 新增：_probe_client 调用点的 proxy 同样必须归一，位置实参与关键字实参两种传法都要抓得到；
+    # 「漏写 proxy 实参」必须变红，而「显式传字面量 None」= 直连、属合法形态（不得误报）
+    factory_bare_positional = "def f(url, proxy_addr):\n" "    c = _probe_client(5, proxy_addr, True)\n"
+    assert _unnormalized_proxy_constructions(factory_bare_positional) == ([2], 0, 1)
+    factory_bare_keyword = "def f(url, proxy_addr):\n" "    c = _probe_client(5, proxy_addr=proxy_addr, verify=True)\n"
+    assert _unnormalized_proxy_constructions(factory_bare_keyword) == ([2], 0, 1)
+    factory_missing_proxy = "def f(url, timeout, verify):\n    c = _probe_client(timeout, verify=verify)\n"
+    assert _unnormalized_proxy_constructions(factory_missing_proxy) == ([2], 0, 1)
+    factory_normalized = (
+        "def f(url, proxy_addr):\n"
+        "    proxy_addr = utils.handle_proxy_addr(proxy_addr)\n"
+        "    c = _probe_client(5, proxy_addr, True)\n"
+    )
+    assert _unnormalized_proxy_constructions(factory_normalized) == ([], 0, 1)
+    factory_explicit_none = "def f(url):\n    c = _probe_client(5, None, True)\n"
+    assert _unnormalized_proxy_constructions(factory_explicit_none) == ([], 0, 1)
+    # 工厂定义体内那次「proxy 来自形参」的构造不得被误报（否则唯一合法构造恒红）
+    factory_body = (
+        "def _probe_client(timeout, proxy_addr, verify):\n"
+        "    return httpx.Client(timeout=timeout, proxy=proxy_addr, verify=verify)\n"
+    )
+    assert _unnormalized_proxy_constructions(factory_body) == ([], 1, 0)

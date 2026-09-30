@@ -20,7 +20,12 @@ URL = sys.argv[1] if len(sys.argv) > 1 else "https://live.bilibili.com/545068"
 # 末尾的 `and not sys.argv[2].startswith("-")` 是必需的守卫：pytest 运行时 sys.argv[2]
 # 可能是 `-q`、`-x` 等选项，缺少该守卫会执行 int('-q') 并抛出 ValueError，
 # 表现为「一跑 pytest 就在收集期崩溃」，且报错位置与该行相距较远，排查成本高。
-SECONDS = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else 20
+# 在此之上再补 isdigit 数值性判定（R7③，2026-09-30）：`pytest a.py b.py …` 一次点多个文件时
+# sys.argv[2] 是**下一个测试文件的路径**，它不带 `-` 前缀、只判非选项就会放行，随后 int(路径) 当场
+# ValueError，本模块收集直接 ERROR（2026-09-30 实测：4 errors during collection）。
+# 真机调用 `python 本文件.py <URL> 60` 的语义完全不变（"60".isdigit() 为真）。
+_SECONDS_RAW = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else ""
+SECONDS = int(_SECONDS_RAW) if _SECONDS_RAW.isdigit() else 20
 
 
 def main() -> None:
@@ -38,10 +43,18 @@ def main() -> None:
 
     # 输出目录固定为 tests/_out_live：先清空再写，避免上一轮遗留的 SRT
     # 混入本轮结果，导致「文件存在」的断言通过但实际内容来自旧数据。
+    # 「清空」的范围现收窄到本脚本自己的产物前缀（R7④，2026-09-30）：无差别删掉目录里每一项会
+    # 把并行运行的其它平台验证产物一起删（真机验证常多平台同开），且目录里混进子目录时
+    # os.remove 直接抛 IsADirectoryError/PermissionError，本轮验证卡在清理阶段。
+    # 原意「本轮从干净目录开始」不变，只是删得准。
     base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_out_live")
     os.makedirs(base_dir, exist_ok=True)
     for f in os.listdir(base_dir):
-        os.remove(os.path.join(base_dir, f))
+        if f.startswith("真实弹幕验证"):
+            stale = os.path.join(base_dir, f)
+            # 先判是文件再删：子目录一律跳过，交由 tests/conftest.py 的会话收尾统一 rmtree。
+            if os.path.isfile(stale):
+                os.remove(stale)
 
     base = os.path.join(base_dir, "真实弹幕验证_545068")
     collector = DanmakuCollector(

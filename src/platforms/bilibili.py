@@ -58,15 +58,47 @@ class BilibiliDanmaku(DanmakuBase):
         self._ws: WsClient | None = None
         self._session_ok = False
         self._auth_ok = False
+        # M-13（2026-09-29 审查）：host 轮换关闭闸门的两枚状态。
+        #   _hosts_left      —— 当前正在尝试的 host **之后**还有几个候选未尝试；
+        #   _close_reported  —— 跨 WsClient 实例的一次性上报保护（WsClient 自己的
+        #                       _close_reported 只在自己的实例内生效，挡不住轮换里
+        #                       第二个、第三个实例各投一次「房间关闭」）。
+        self._hosts_left = 0
+        self._close_reported = False
+
+    # M-13：on_close 的唯一出口（轮换闸门 + 一次性保护），命名与 src/ws_client.py::_report_close 对齐。
+    # 为什么必须有闸门：消费端（src/collector.py::_on_close → hub.room_closed）把 on_close 当作
+    # 「该房间弹幕已结束」的配对信号，而 start() 的 host 轮换循环在当前 host 重连耗尽后**还会继续
+    # 试下一个候选**。原写法把 self._on_close 直接挂给每一个 WsClient，于是 host[0] 耗尽 2 次重连
+    # 就先发一次 room_closed，随后 host[1] 连上又发 room_connected —— 监控页出现「假关闭→重连」
+    # 闪烁并落一条与事实不符的 closed 记录；两个候选都失败时更会把同一房间的关闭事件投两次。
+    # 闸门只两条口径，不改 WsClient 的重连计数、也不改 AUTH 看门狗（H-4）的处置语义：
+    #   ① 仍有候选 host 未尝试且未整体停止 → 属轮换中间态，不上报；
+    #   ② 候选已排空，或已置 _stopped（_reject_auth 的进房认证被拒是终态，MID-2245 要求必须上报，
+    #      否则监控页永久停在「已连接 / 0 条」）→ 上报，且本会话内只上报一次。
+    def _report_close(self, reason: str) -> None:
+        if self._hosts_left > 0 and not self._stopped:
+            # 留痕不静默：改走 DanmakuBase._on_reconnect 这条**既有**的 debug 通道（语义正合适——
+            # 本 host 断了、正在换下一个候选，属中间态而非关闭；其文案已登记在四语目录，
+            # 不新造 msgid，也就不给 i18n 门禁「运行时模板 ⊆ zh_CN.po 键集」添缺口）。
+            self._on_reconnect(reason)
+            return
+        if self._close_reported:
+            return
+        self._close_reported = True
+        if self._on_close:
+            self._on_close(reason)
 
     # 启动：解析房间/服务器参数，逐个尝试 host 建立 WebSocket 连接，失败则回调 on_close。
     async def start(self, args: Any) -> None:
         self._args = args if isinstance(args, dict) else {}
+        # M-13：一次 start() = 一个会话，关闭事件的去重域随会话重新起算（采集器每轮新建实例，
+        # 但重启同一实例时不得被上一轮的标记永久消音）。
+        self._close_reported = False
         server_host = self._args.get("server_host", "")
         room_id = self._args.get("room_id")
         if not server_host or not room_id:
-            if self._on_close:
-                self._on_close("缺少 server_host/room_id")
+            self._report_close("缺少 server_host/room_id")
             return
 
         hosts = [str(h) for h in (self._args.get("host_list") or []) if h]
@@ -88,8 +120,7 @@ class BilibiliDanmaku(DanmakuBase):
                 )
         hosts = _allowed
         if not hosts:
-            if self._on_close:
-                self._on_close(i18n.tr("无可用弹幕服务器（host 均不在 B站官方域白名单内）"))
+            self._report_close(i18n.tr("无可用弹幕服务器（host 均不在 B站官方域白名单内）"))
             self._session_ok = False
             return
 
@@ -98,6 +129,9 @@ class BilibiliDanmaku(DanmakuBase):
         for idx, host in enumerate(hosts):
             if self._stopped:
                 return
+            # M-13：进入本 host 之前先登记「其后还有几个候选未尝试」，供 _report_close 判定
+            # 当前失败是轮换中间态还是终态（最后一个候选的左值为 0）。
+            self._hosts_left = len(hosts) - idx - 1
             backup = hosts[idx + 1] if idx + 1 < len(hosts) else None
             self._ws = WsClient(
                 url=f"wss://{host}/sub",
@@ -106,7 +140,10 @@ class BilibiliDanmaku(DanmakuBase):
                 on_message=self.decode_message,
                 on_ready=self._on_ws_ready,
                 on_heartbeat=self.heartbeat,
-                on_close=self._on_close,
+                # M-13：这里挂的是闸门而非裸回调——本 host 失败后循环还会试下一个候选，
+                # 此刻的 on_close 不是「房间关闭」。backup_url 那条 WsClient 内部的主备切换
+                # 保持原样（两套轮换机制并存属既有形态，本次只收口上报语义，不合并成第三套）。
+                on_close=self._report_close,
                 on_reconnect=self._on_reconnect,
                 headers={"cookie": cookie} if cookie else None,
                 max_reconnect=2,
@@ -116,6 +153,10 @@ class BilibiliDanmaku(DanmakuBase):
             await self._ws.connect()
             if self._session_ok or self._stopped:
                 break
+        # M-13：轮换到此结束（会话建成 break / 候选全部试完自然退出）——此后不存在「未尝试的候选」，
+        # 会话期间若真发生重连耗尽就是终态，必须照常上报；这里不清零的话，成功那一轮留下的
+        # _hosts_left 会把后来的真实断连一并吞掉，正是 MID-2245 想消灭的「已连接 / 0 条」观感回归。
+        self._hosts_left = 0
 
     # WS 就绪回调：置进房成功标志、触发 on_ready 并异步发送进房包。
     def _on_ws_ready(self) -> None:

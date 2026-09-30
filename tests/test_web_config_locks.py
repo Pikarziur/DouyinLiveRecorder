@@ -28,7 +28,7 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 _BASE_URL = "http://127.0.0.1:8000"
 # 与 src/web_api.py 里 raise HTTPException(400, ...) 的原文逐字一致：文案是契约的一部分，

@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
+import os
 import shlex
+import signal
 import subprocess
+import sys
 import time
 from typing import cast
 
@@ -9,6 +12,7 @@ from loguru import logger
 import i18n
 import main
 from msg_push import bark, dingtalk, ntfy, pushplus, send_email, tg_bot, xizhi
+from src import utils
 from src.video_postprocess import get_startup_info
 
 # 通知与录制状态钩子（独立模块）
@@ -85,6 +89,105 @@ def push_message(record_name: str, live_url: str, content: str) -> None:
 # 模块级常量便于测试注入。
 _SCRIPT_TIMEOUT_SECONDS = 300.0
 
+# [M-5 2026-09-29 补] 超时**之后**回收管道读取的时限（秒）。修复前第二次 communicate() 不带超时：
+# 脚本只要起过孙进程（rclone / curl / 数据库客户端这类上传脚本的常态），孙进程就继承管道写端，
+# 只 kill 直接子进程永远读不到 EOF ⇒ 录后钩子线程被永久挂住。本机 Windows 实测：脚本起的孙进程
+# sleep 60 时，kill 掉直接子进程后 communicate 仍取不到输出。宁可丢一段输出也不许无界阻塞。
+_SCRIPT_REAP_TIMEOUT_SECONDS = 10.0
+
+# taskkill 自身的时限（秒）：进程树很大或权限不足时，不得让「回收进程树」变成第二个挂起点。
+_TREE_KILL_TIMEOUT_SECONDS = 5.0
+
+# 进程树回收的平台判定，刻意做成模块级常量而不是在函数里就地读 os.name/sys.platform：
+# 用例可 monkeypatch.setattr(notify, "_KILL_TREE_VIA_TASKKILL", True) 让 Windows 分支在 Linux CI 上
+# 真实执行（AGENTS「平台专属分支的测试不得靠 skipif 让 CI 跳过」）。
+_KILL_TREE_VIA_TASKKILL = os.name == "nt"
+
+
+# 把 TimeoutExpired 里「已经读到的部分输出」收口成 bytes：communicate() 超时抛的异常带 stdout/stderr
+# 字段，text 模式下是 str、一条都没读到时是 None，两种都不许流到下游 .decode()（会抛 AttributeError）。
+def _partial_output_bytes(value: object) -> bytes:
+    return value if isinstance(value, bytes) else b""
+
+
+# POSIX 进程组回收：脚本以 start_new_session=True 启动 ⇒ 自成会话，进程组 ID == 子进程 PID，
+# killpg 一次收掉脚本 + 它起的全部孙进程（只 kill 直接子进程会留下握着管道写端的孙进程）。
+# os.killpg/os.getpgid 与 signal.SIGKILL 都是 POSIX-only 符号（typeshed 在 win32 下不导出它们），
+# 必须用 sys.platform **字面量**门控，本地 mypy（win32）与 `mypy --platform linux` 才能双跑干净；
+# 门控条件写反静态检查发现不了，由 tests/test_notify_script_guard.py::
+# test_platform_gate_direction_is_locked_in_source 断言「早返回行在 killpg 行之前
+# 且比较的是 == "win32"」锁住方向；win32 下本函数什么都不做，由 _kill_process_tree 的 finally 兜底。
+def _kill_posix_process_group(pid: int) -> None:
+    if sys.platform == "win32":
+        return
+    os.killpg(os.getpgid(pid), signal.SIGKILL)
+
+
+# 超时后回收**整棵进程树**（M-5）：任何失败一律退化到只杀直接子进程（= 修复前的行为），
+# 绝不向调用方抛出——run_script 对外的成败语义由脚本进程自己决定，不由回收路径决定。
+# masked_command 由调用方预先脱敏后传入（本函数只负责杀进程与留痕，不再碰原文）。
+def _kill_process_tree(process: subprocess.Popen[bytes], masked_command: str) -> None:
+    try:
+        if _KILL_TREE_VIA_TASKKILL:
+            # Windows：taskkill /T（递归子树）/F（强制）。一律 argv 列表调用，禁止 shell=True——
+            # 参数里带的是用户脚本命令行，交给 cmd 解释等于把 run_script「不用 shell」的前提推倒。
+            # 输出不参与判定，故 capture_output 后按字节原样丢弃、**不做解码**（中文 Windows 上
+            # taskkill 按 GBK 码页回显本地化消息，AGENTS「探测子进程输出一律按字节比较」同源）。
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=_TREE_KILL_TIMEOUT_SECONDS,
+                check=False,
+            )
+        else:
+            _kill_posix_process_group(process.pid)
+    except Exception as e:
+        # 落这里的典型形态：子进程已自行退出（ProcessLookupError）、Linux CI 上被强制走 Windows
+        # 分支时压根没有 taskkill（FileNotFoundError）、taskkill 自身超时。留痕但不改写结果——
+        # 下面 finally 仍会 kill 直接子进程。
+        # msgid 复用既有的「执行自定义脚本失败」条目：新增模板要同批改四份 i18n 目录并重编 .mo
+        # （AGENTS 关键约定 #14），不在本文件权限内；异常类型与脱敏文本照旧走实参。
+        logger.warning(
+            i18n.tr(
+                "执行自定义脚本失败: {command} - {type_name}: {e}",
+                command=masked_command,
+                type_name=type(e).__name__,
+                e=utils.mask_credentials(str(e)),
+            )
+        )
+    finally:
+        try:
+            process.kill()
+        except OSError:
+            # 进程已经自行退出（ProcessLookupError 是 OSError 子类）正是期望结果，无需上报
+            pass
+
+
+# 把「已脱敏的命令原文」拆成 argv 并起脚本进程；返回 Popen[bytes]（管道按字节读，
+# 解码在调用侧统一做，见 run_script 里 errors="replace" 的取舍说明）。
+# 独立成函数而不是在 run_script 里分叉两次 Popen 调用：两个平台形态各写一遍字面调用，
+# 比 `**dict` 拼装更稳（后者会让 mypy 丢掉 Popen[bytes] 的推断，也会让替身用例的
+# kwargs 断言变得依赖拼装顺序）。
+def _spawn_script(args: list[str]) -> subprocess.Popen[bytes]:
+    if _KILL_TREE_VIA_TASKKILL:
+        # Windows：不传 start_new_session。它在 CPython 的 Windows 侧是
+        # unused_start_new_session（文档明确 POSIX only），传了零收益，却把「会话 detach」
+        # 这个 POSIX 语义塞进 Windows 的进程创建参数里（本机实测过一次偶发
+        # OSError [WinError 50] 不支持该请求，与第三方 CreateProcess 钩子/沙箱层有关，
+        # 无必要就不去碰）；Windows 的进程树回收一律走 taskkill /T。
+        return subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=get_startup_info(main.os_type)
+        )
+    # POSIX：让脚本自成会话/进程组 ⇒ _kill_posix_process_group 的 killpg 能一次收掉整棵树
+    # （孙进程继承着 stdout 管道的写端，只 kill 直接子进程时第二次 communicate 读不到 EOF）。
+    return subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        startupinfo=get_startup_info(main.os_type),
+    )
+
 
 # 执行用户自定义的录后脚本命令 command（shlex 拆分，不用 shell），打印其 stdout/stderr；无返回值
 def run_script(command: str) -> None:
@@ -96,22 +199,42 @@ def run_script(command: str) -> None:
     #   正斜杠（"C:/path/to.exe"）或 PowerShell 原生语法（& "C:\path\to.exe"）；彻底修复需重写拆分器。
     # - stdout/stderr 以 errors="replace" 解码：Windows 脚本常输出 GBK 字节（如 PowerShell 中文），
     #   严格 utf-8 会抛 UnicodeDecodeError 被 except 兜底误报成「命令解析失败」。
+    #
+    # [M-5 2026-09-29 补] 日志脱敏：command 里常内嵌凭据（rclone 的 remote token、curl 的
+    # Authorization 头、数据库口令），而 logs/ 下的日志按 rotation 保留多份 ⇒ 原文入日志＝凭据
+    # 长期落盘。故所有会进日志的 command / 异常文本一律过 utils.mask_credentials，只在落日志时
+    # 脱敏，实际执行的 args 仍用原文。脚本自身的 stdout/stderr 仍原样 print（那是用户脚本的输出、
+    # 不是本模块产生的命令原文；对它脱敏会破坏上传/转码日志的可读性），结构性治本（loguru patcher
+    # 统一过码）已在 src/utils.py::mask_credentials 的注释里列为另案待办。
+    masked_command = utils.mask_credentials(command)
     try:
         args = shlex.split(command)
-        process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=get_startup_info(main.os_type)
-        )
+        process = _spawn_script(args)
         try:
             stdout, stderr = process.communicate(timeout=_SCRIPT_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            # 脚本挂起：先 kill 再回收管道，避免读取线程残留导致调用方永久阻塞
-            process.kill()
-            stdout, stderr = process.communicate()
+            # 脚本挂起：先收整棵进程树（孙进程会握着管道写端，只 kill 直接子进程读不到 EOF），
+            # 再带**有限超时**地回收管道，避免读取线程残留导致调用方永久阻塞（M-5）。
+            _kill_process_tree(process, masked_command)
+            try:
+                stdout, stderr = process.communicate(timeout=_SCRIPT_REAP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as e:
+                # 依然读不到 EOF（顽固孙进程 / 进程处于不可中断睡眠）⇒ 放弃读取，只取异常里已读到
+                # 的部分；未读的管道随 Popen 对象由解释器的子进程清理收尾，绝不再无限阻塞录后线程。
+                stdout, stderr = _partial_output_bytes(e.stdout), _partial_output_bytes(e.stderr)
+                logger.warning(
+                    i18n.tr(
+                        "执行自定义脚本失败: {command} - {type_name}: {e}",
+                        command=masked_command,
+                        type_name=type(e).__name__,
+                        e=utils.mask_credentials(str(e)),
+                    )
+                )
             logger.error(
                 i18n.tr(
                     "执行自定义脚本超时（{_SCRIPT_TIMEOUT_SECONDS} 秒），已终止: {command}",
                     _SCRIPT_TIMEOUT_SECONDS=_SCRIPT_TIMEOUT_SECONDS,
-                    command=command,
+                    command=masked_command,
                 )
             )
         stdout_decoded = stdout.decode("utf-8", errors="replace")
@@ -124,22 +247,30 @@ def run_script(command: str) -> None:
         logger.error(
             i18n.tr(
                 "执行自定义脚本失败（无执行权限）: {command} - {type_name}: {e}",
-                command=command,
+                command=masked_command,
                 type_name=type(e).__name__,
-                e=e,
+                e=utils.mask_credentials(str(e)),
             )
         )
         logger.error("脚本无执行权限!, 若是Linux环境, 请先执行:chmod +x your_script.sh 授予脚本可执行权限")
     except OSError as e:
         logger.error(
             i18n.tr(
-                "执行自定义脚本失败: {command} - {type_name}: {e}", command=command, type_name=type(e).__name__, e=e
+                "执行自定义脚本失败: {command} - {type_name}: {e}",
+                command=masked_command,
+                type_name=type(e).__name__,
+                e=utils.mask_credentials(str(e)),
             )
         )
         logger.error("Please add `#!/bin/bash` at the beginning of your bash script file.")
     except ValueError as e:
         logger.error(
-            i18n.tr("脚本命令解析失败: {command} - {type_name}: {e}", command=command, type_name=type(e).__name__, e=e)
+            i18n.tr(
+                "脚本命令解析失败: {command} - {type_name}: {e}",
+                command=masked_command,
+                type_name=type(e).__name__,
+                e=utils.mask_credentials(str(e)),
+            )
         )
 
 

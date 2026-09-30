@@ -8,6 +8,7 @@
 # 故 caplog 抓不到——测试自带 InMemorySink 捕获消息文本。
 
 import io
+import shlex
 import sys
 import time
 from collections.abc import Generator
@@ -22,6 +23,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402  必须在 src.notify 之前
 import src.notify as notify  # noqa: E402
+
+# M-30：命令一律用 sys.executable，不再写死字面量 `python`。
+# 生产 run_script 以 shell=False + shlex.split 在 PATH 里查找可执行文件，而 Linux/CI 镜像常
+# 只提供 python3（无 python 软链），旧写法在 CI 上「正常完成 / 超时」两条用例必失败，
+# 本机 Windows 有 python  launcher 却单跑必绿——典型的「本地绿、CI 红」。
+# 换绑口径与 tests/test_run_gates.py::test_run_command_rebinds_interpreter_to_current_python
+# 同族（把命令里的解释器换成当前跑 pytest 的那个），语义与断言均不变。
+# 必须 shlex.quote：路径可能含空格，且 run_script 走 shlex.split(posix=True)——
+# 实测单引号内的 Windows 反斜杠按字面保留（'C:\a\b.exe' → C:\a\b.exe），round-trip 无损。
+# 本文件其余两处「可执行文件字面量」刻意不改写：
+#   __definitely_not_a_real_binary_42__ 要的正是「PATH 里查不到」⇒ OSError 分支；
+#   echo "unterminated 在 shlex.split 阶段就抛 ValueError，永远不会真的起进程。
 
 
 @pytest.fixture
@@ -47,7 +60,7 @@ def log_capture() -> Generator[io.StringIO, None, None]:
 
 def test_run_script_normal_completion(capsys: pytest.CaptureFixture[str]) -> None:
     # 正常完成的脚本：stdout 应原样打印到当前 stdout
-    notify.run_script("python -c \"print('hello-from-script')\"")
+    notify.run_script(f"{shlex.quote(sys.executable)} -c \"print('hello-from-script')\"")
     captured = capsys.readouterr()
     assert "hello-from-script" in captured.out
 
@@ -58,9 +71,13 @@ def test_run_script_timeout_kills_process(
 ) -> None:
     # 挂起脚本（sleep 30）必须在 1 秒超时后被 kill，且 log 记超时
     started = time.monotonic()
-    notify.run_script('python -c "import time; time.sleep(30)"')
+    notify.run_script(f'{shlex.quote(sys.executable)} -c "import time; time.sleep(30)"')
     elapsed = time.monotonic() - started
     # 超时 1 秒 + kill + 二次 communicate 回收管道；留出 4 秒余量
+    # [M-5 2026-09-29 补] 现在的回收顺序是「先杀整棵进程树（Windows: taskkill /T /F；
+    # POSIX: killpg）→ 第二次 communicate 带 _SCRIPT_REAP_TIMEOUT_SECONDS 有限超时」，
+    # 4 秒余量同时覆盖 taskkill 那一轮子进程调用；进程树与超时分支的逐条锁在
+    # tests/test_notify_script_guard.py，本文件只管「超时后确实不再占着调用线程」。
     assert elapsed < 4.0, f"超时未被强制回收: elapsed={elapsed:.2f}s"
     log_text = log_capture.getvalue()
     assert "执行自定义脚本超时" in log_text

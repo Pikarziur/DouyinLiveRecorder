@@ -196,25 +196,46 @@ def main() -> None:
     host: str = cast(str, web_cfg["web_host"])
     port: int = cast(int, web_cfg["web_port"])
 
-    if not web_cfg["web_show_console"]:
-        _enter_background_mode(logs_dir, host, port)
-
     # 不安全绑定防护（C1）：未启用认证时拒绝监听非回环地址，防止局域网内未授权访问
     # （文件下载/配置读写）。需显式设置环境变量 DOUYIN_WEB_ALLOW_INSECURE=1 才放行。
-    # F-22（2026-09-12）：本检查块必须保持在录制引擎线程与 uvicorn 创建**之前**——上移后
-    # 拒绝即零副作用退出；若放在 serve() 前，daemon 线程已读过配置、初始化过调度器，
-    # 日志里会留下一次「启动成功过」的假痕迹。
+    # M-18（2026-09-29）确立的不变量：**安全拒绝必须发生在任何 stdio 重定向 / 控制台隐藏之前**。
+    # 本块此前落在 `_enter_background_mode()` 之后，`web_show_console=false` 时执行到这里窗口
+    # 已经 SW_HIDE、sys.stdout/sys.stderr 已经指向 logs/web_console.log，四条拒绝文案全部进了
+    # 日志文件——用户视角只剩「控制台一闪、面板起不来」，必须翻日志才知道是被安全策略拦下。
+    # 现整体前移到背景化之前；F-22（2026-09-12）要求的「保持在录制引擎线程与 uvicorn 创建之前」
+    # 同时成立（本块仍早于二者，daemon 线程不会先读配置、初始化调度器，日志里不留
+    # 「启动成功过」的假痕迹）。
+    # [历史注] F-22 原注释自称此处「拒绝即零副作用退出」——已被证伪并改正：拒绝曾发生在背景化
+    # 之后，「隐藏窗口」与「重定向 stdio」两项副作用已经落地。
+    # 为什么不能更提前（仍在 `import main` 之后）：`read_web_config` 的入参 `main.config_file`
+    # 由 main 的模块级 `_app_root()` 解析（冻结后指向 exe 同级目录），提前到 import 之前就拿不到
+    # 与录制端同源的配置文件路径，只能另写一套路径推导（与「运行时资源与 exe 同级」约定分叉）。
+    # 故「零副作用」收敛为可证且用户可见的口径：**无 stdio 副作用的拒绝**。
     # SEV-04：本检查只在启动瞬间评估一次，而面板写接口可热改 web_auth_enable / web_host，
     # 同款不变量现由 src/web_api.py 的鉴权中间件按**每个 /api/* 请求**重跑（判定口径与本处同源：
     # web_config.is_loopback_bind_host + 同一枚 DOUYIN_WEB_ALLOW_INSECURE 逃生阀），
     # 本处保留为「零副作用拒绝启动」的第一道。
+    # （上行「零副作用」的准确口径见本块开头 M-18 注：可保证的是无 stdio 副作用。）
     if not web_cfg["web_auth_enable"] and not _is_loopback_host(host):
         allow_insecure = os.environ.get("DOUYIN_WEB_ALLOW_INSECURE", "").strip().lower() in ("1", "true", "yes")
         if not allow_insecure:
-            print(i18n.tr("[web] ❌ 拒绝启动: 未启用 Web 认证时不允许监听非回环地址 ({host})。请二选一:", host=host))
+            _reject_msg = i18n.tr(
+                "[web] ❌ 拒绝启动: 未启用 Web 认证时不允许监听非回环地址 ({host})。请二选一:", host=host
+            )
+            print(_reject_msg)
             print("      1. config.ini [Web] 节设置 web_auth_enable = true 并配置 web_password；")
             print("      2. 或设置 web_host = 127.0.0.1 仅限本机访问。")
             print("      如确需在无认证状态暴露到局域网，请设置环境变量 DOUYIN_WEB_ALLOW_INSECURE=1 后重启（不推荐）。")
+            # M-18：文案此时已落到真实控制台；再补一条 warning 是为一类仍看不见的启动形态兜底——
+            # pythonw.exe 与冻结 console=False 的窗口化入口 sys.stderr 为 None（见 AGENTS
+            # 「无控制台环境 sys.stderr is None」条），print 直接落空，日志文件是唯一留痕；桌面双击
+            # 启动时控制台随 sys.exit 立即销毁，用户无法回看。loguru 的**文件** sink 在 src.logger
+            # 导入期就已注册，与本块先后无关；控制台 sink 的重建仍归 `_enter_background_mode`，
+            # 顺序约束未动。
+            try:
+                logger.warning(_reject_msg)
+            except Exception:
+                pass
             sys.exit(1)
         # WD-07：破例路径把可被利用的具体能力列清楚并写入日志——用户照抄环境变量时至少知道
         # 自己在开放什么，也便于事后审计「这台机器何时以无认证方式对局域网开放过」。
@@ -233,6 +254,12 @@ def main() -> None:
             logger.warning(_insecure_msg)
         except Exception:
             pass
+
+    # M-18：背景化（隐藏控制台 + 重定向 stdout/stderr）必须在上面那道安全闸门**之后**——
+    # 一旦执行到这里，后续任何拒绝/异常文案用户都只能翻 logs/web_console.log 才看得到。
+    # 不得把 `_enter_background_mode` 挪回检查之前。
+    if not web_cfg["web_show_console"]:
+        _enter_background_mode(logs_dir, host, port)
 
     # Web 模式默认不自动开启录制：录制引擎线程保持运行（配置热加载/调度器就绪），
     # 但不拉起任何房间线程，由面板「开始录制」按钮经 POST /api/recording/toggle 手动触发。
@@ -293,6 +320,8 @@ def main() -> None:
     _auth_text = i18n.tr("已启用") if web_cfg["web_auth_enable"] else i18n.tr("未启用")
     print(i18n.tr("[web] 认证: {web_auth_enable}", web_auth_enable=_auth_text))
     # 不安全绑定检查已上移至引擎线程启动之前（见上方 F-22 注释）
+    # M-18（2026-09-29）追加：该检查现已同时上移到 `_enter_background_mode()` 之前，
+    # 「拒绝文案必须在 stdio 被重定向之前落到真实控制台」这条顺序约束见该块开头注释。
 
     # 阻塞运行；托盘「退出程序」或 Ctrl+C 会将 should_exit 置真，serve() 优雅返回。
     # server.serve() 为 async 协程，必须用 asyncio.run 驱动事件循环真正运行，

@@ -7,13 +7,21 @@
 // （表格行由 innerHTML 拼接，已改用 rooms-tbody 上的事件委托）。
 // 状态组织：一组模块级闭包变量（sseWanted/sseStopped/sseSource 仪表盘轮询、dm* 弹幕轮询与缓冲、
 // configBackup 配置快照供 diff、toastTimer 提示定时器），不引入框架或状态机。
+// [M-21 2026-09-29 补充] 上一行的 sseSource / dmTimer / logTimer 三个裸 timer 变量已被三个
+// makePollChain() 控制器（sseChain/dmChain/logsChain）取代：单变量只能记住「已排期」的那一个
+// 定时器，记不住在途请求，导致「停止→立即重启」会漏出一条无人回收的轮询链。见 10b 节。
 // 与后端交互：统一经 api() 包装 fetch——自动带 Bearer Token、JSON 序列化、401 跳登录、按
 // content-type 决定返回 JSON 还是纯文本；二进制下载刻意绕过 api()（它返回 text，会破坏 blob），
 // 直接 fetch + blob。轮询全部用 setTimeout 递归（非真 SSE/WebSocket），每轮结束后若未被停止才排
 // 下一轮；切视图/离屏经 stop* 清定时器，避免多视图同时轮询造成请求堆积。
+// [M-21 2026-09-29 补充] 「清定时器」清不掉**在途**请求，所以三条链的续期一律经 makePollChain()
+// 比对代次：被 stop*/start* 取代的旧轮次落地后既不续期、也不写回任何链状态。
 // 安全要点：所有动态文本（房间名、弹幕、文件名、配置值、日志）渲染前一律经 esc() 转义；敏感段的
 // 输入框用 password 类型。掩码凭据的三条防线（MID-37）以 saveConfig 的头注释为唯一事实源，其中
 // 「原样看到 '***' 即跳过提交」是**写入侧唯一防线**，删掉它掩码就会被回写、覆盖后端真实凭据。
+// [2026-09-29 补充] 上句「一律经 esc()」此前有漏网：弹幕折叠计数 m.dropped 是裸插值（M-23，已修）。
+// 「敏感段的输入框用 password 类型」此前也有一处例外：认证复验口令走 window.prompt 明文采集
+// （M-22，已改为 #reauth-modal 的 type="password" 输入框，且口令只随认证两键的 PUT 下发）。
 (function () {
     'use strict';
 
@@ -90,7 +98,10 @@
         return SENSITIVE_KEY_RE.test(key);
     }
 
-    var sseSource = null;
+    // M-21（2026-09-29）：裸变量 sseSource 由 sseChain 取代——一个 timer id 记不住两条链，
+    // 「停止→立即重启」时在途请求落地会把自己那一条重新排期并顶掉这里的 id，旧链从此失联。
+    // 控制器定义与选型理由见下方 10b 的 makePollChain()（函数声明提升，故状态区可先实例化）。
+    var sseChain = makePollChain();
     var sseStopped = true;
     // SEV-2227：把「想要轮询」与「轮询已停」拆成两个状态（本文件该拆分的唯一完整说明，其余
     // 各处只引用不重述）。原实现只有一个 sseStopped：隐藏时 stopSSE() 把它置 true，回到前台却判断
@@ -104,7 +115,8 @@
 
     // 弹幕监控状态：dmTimer/dmStopped 控制轮询；dmLastSeq 为增量游标；
     // dmMessages 为前端保留的近期消息（最多 300 条），切筛选时全量重绘。
-    var dmTimer = null;
+    // [M-21 2026-09-29] dmTimer 已由 dmChain 承载（同上，控制器定义见 10b），dmStopped 语义不变。
+    var dmChain = makePollChain();
     var dmStopped = true;
     var dmLastSeq = 0;
     var dmMessages = [];
@@ -286,6 +298,13 @@
     //   ② 四套键集必须逐一相等、且须覆盖 index.html 的每个 data-i18n* 键与本文件每个 t() 字面量键
     //      ——该不变量由 tests/frontend/test_quality_ui.mjs 的 MIN-10 段机检（它按字面量截取本文件的
     //      I18N 声明求值，故声明行与四套键名不可重排或改名）。
+    //   [2026-09-29 实测补充，M-22 新增 common.cancel 时核对] ① 那句「五处齐改」对本面板的点分键
+    //   （config.save / common.cancel / danmaku.* 等）实际不成立：后端四份 gettext 目录按**中文源串**
+    //   作 msgid，只服务控制台/GUI/推送正文，面板键一条都不在里面（判据：grep -c 录制与推送配置
+    //   i18n/en_US.json i18n/zh_TW.yaml 均为 0，而内嵌目录里有该键）。故新增**仅面板可见**的文案时
+    //   同步范围是下面这四套内嵌目录；往 zh_CN.po/en_US.json 里塞面板键只会得到无人 import 的孤儿
+    //   msgid（compile_po.py --check 与 extract_i18n_strings.py 都不报，需人工回查）。
+    //   真正需要五处同改的是控制台/GUI/推送侧的中文源串（见 AGENTS.md「i18n 扫描盲区清单」）。
     var LANG_KEY = 'dlr_lang';
     var currentLang = 'zh_CN';
     var I18N = {
@@ -346,7 +365,10 @@
             'config.authChangeSkipped': '已跳过 {n} 项认证相关改动（未确认）',
             'config.authChangeReauth': '请复验当前 Web 口令（修改认证配置需要；留空或取消即放弃本次改动）:',
             'files.title': '录制文件', 'files.root': '根目录', 'files.emptyDir': '空目录',
-            'common.yes': '是', 'common.no': '否', 'common.unauthorized': '未授权',
+            // M-22（2026-09-29）新增：common.cancel —— #reauth-modal 口令窗的取消按钮。
+            // 面板此前没有「通用取消」串（确认类交互一律走 window.confirm），四套目录同键同步添加，
+            // 键集相等由 tests/frontend/test_quality_ui.mjs 的 MIN-10 段机检。
+            'common.yes': '是', 'common.no': '否', 'common.cancel': '取消', 'common.unauthorized': '未授权',
             'common.requestFailed': '请求失败',
             'toast.enabled': '已启用', 'toast.disabled': '已禁用', 'toast.opFailed': '操作失败: ',
             'toast.deleted': '已删除', 'toast.deleteFailed': '删除失败: ', 'toast.added': '已添加',
@@ -412,7 +434,7 @@
             'config.authChangeSkipped': 'Skipped {n} authentication-related change(s) (not confirmed)',
             'config.authChangeReauth': 'Re-enter the current Web password (required to change authentication settings; leave blank or cancel to discard this change):',
             'files.title': 'Recordings', 'files.root': 'Root', 'files.emptyDir': 'Empty folder',
-            'common.yes': 'Yes', 'common.no': 'No', 'common.unauthorized': 'Unauthorized',
+            'common.yes': 'Yes', 'common.no': 'No', 'common.cancel': 'Cancel', 'common.unauthorized': 'Unauthorized',
             'common.requestFailed': 'Request failed',
             'toast.enabled': 'Enabled', 'toast.disabled': 'Disabled', 'toast.opFailed': 'Operation failed: ',
             'toast.deleted': 'Deleted', 'toast.deleteFailed': 'Delete failed: ', 'toast.added': 'Added',
@@ -478,7 +500,7 @@
             'config.authChangeSkipped': 'Skipped {n} authentication-related change(s) (not confirmed)',
             'config.authChangeReauth': 'Re-enter the current Web password (required to change authentication settings; leave blank or cancel to discard this change):',
             'files.title': 'Recordings', 'files.root': 'Root', 'files.emptyDir': 'Empty folder',
-            'common.yes': 'Yes', 'common.no': 'No', 'common.unauthorized': 'Unauthorised',
+            'common.yes': 'Yes', 'common.no': 'No', 'common.cancel': 'Cancel', 'common.unauthorized': 'Unauthorised',
             'common.requestFailed': 'Request failed',
             'toast.enabled': 'Enabled', 'toast.disabled': 'Disabled', 'toast.opFailed': 'Operation failed: ',
             'toast.deleted': 'Deleted', 'toast.deleteFailed': 'Delete failed: ', 'toast.added': 'Added',
@@ -544,7 +566,7 @@
             'config.authChangeSkipped': '已跳過 {n} 項認證相關變更（未確認）',
             'config.authChangeReauth': '請複驗目前 Web 口令（修改認證設定需要；留空或取消即放棄本次變更）:',
             'files.title': '錄製檔案', 'files.root': '根目錄', 'files.emptyDir': '空資料夾',
-            'common.yes': '是', 'common.no': '否', 'common.unauthorized': '未授權',
+            'common.yes': '是', 'common.no': '否', 'common.cancel': '取消', 'common.unauthorized': '未授權',
             'common.requestFailed': '請求失敗',
             'toast.enabled': '已啟用', 'toast.disabled': '已停用', 'toast.opFailed': '操作失敗: ',
             'toast.deleted': '已刪除', 'toast.deleteFailed': '刪除失敗: ', 'toast.added': '已新增',
@@ -717,10 +739,70 @@
             var data = await api('/api/login', { method: 'POST', body: { password: pw } });
             setToken(data.token || '');
             $('login-error').textContent = '';
+            // M-22 配套（轻微项 41 的同类形态）：登录成功后口令不再需要，却仍留在 #login-password 里
+            // ——视图只是被 .hidden 隐藏、value 一个字符都没少，DevTools/浏览器扩展/自动填充快照都拿得到。
+            // 失败分支刻意**不清**：口令输错时用户要改一两个字符重登，清空等于逼他重打。
+            var pwEl = $('login-password');
+            if (pwEl) pwEl.value = '';
             showView('dashboard');
         } catch (e) {
             $('login-error').textContent = e.message || t('login.failed');
         }
+    }
+
+    // 10b. makePollChain —— M-21（2026-09-29）：三条轮询链唯一共用的一份「代次」实现。
+    // 失效形态：stop*/pause* 只能 clearTimeout 掉**已排期**的定时器，取消不了**在途**请求；而旧请求
+    // 落地后的续期回调只看一个布尔标志（sseStopped/logStopped/dmStopped）。「停止 → 立即重启」（快速
+    // 切标签页、切视图、或 visibilitychange 的隐藏/恢复紧邻发生）会把标志重新置回「在跑」，于是旧链在
+    // 自己的回调里再排一次 setTimeout，并把模块级 timer 变量顶掉——两条链只剩一条能被 stop* 回收，
+    // 另一条从此失联、按节拍持续发请求并渲染隐藏 DOM，直到下一次完整 stop 才自愈。状态接口超时上限
+    // API_TIMEOUT_MS=10s（api()），请求发出后有整整 10 秒的窗口能被这次重启「认领」，窗口真实存在。
+    // 机制：每次 halt/begin 都把代次 +1；每一轮 poll 带着自己那一代的代次回来，续期前必须证明
+    // 「我仍是当前这一代」（renew），否则自行消失；响应分支用 isCurrent 同样过滤，过期轮次既不渲染
+    // 也不改动链状态（退避计数、增量游标）。
+    // 取舍（文档给的另一个选项是重启时 AbortController.abort() 在途请求，此处不选，三条理由）：
+    //   ① api() 内部自建 AbortController、只把 signal 交给 fetch，外部拿不到句柄；要 abort 就得给 api()
+    //     增加可选取消参数并改全部调用点，还会牵动 401 跳登录 / 10s 超时 / 失败退避的既有语义，
+    //     侵入面与回归风险远大于本条要修的竞态。
+    //   ② 本条要的是「旧链不得再排期、不得再产生副作用」，代次已经足够；abort 只省掉被顶替那一轮的
+    //     响应体下载，换来的是接口契约变更。
+    //   ③ abort 后 fetch 抛 AbortError，会落进三条链各自的 catch：SSE 侧把「自己主动取消」记成一次
+    //     网络失败（sseFailCount++ → 触发 2→5→10→30s 退避并弹「状态数据获取失败」横幅），面板行为
+    //     反而比修复前更坏。
+    // 代价（知情接受）：被顶替的在途请求仍会把当轮响应下载完（最长 10s）再丢弃，本条不做真取消。
+    function makePollChain() {
+        var timer = null;
+        var gen = 0;
+        // 作废当前代：推进代次使一切在途回调失效，并清掉唯一那个已排期的定时器。
+        function halt() {
+            gen += 1;
+            if (timer) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            return gen;
+        }
+        // 起新链：先 halt 顶掉旧链（含其一切在途回调），再排第一轮，把本轮代次交给 poll 带着走。
+        function begin(firstDelay, run) {
+            var myGen = halt();
+            timer = setTimeout(function () {
+                run(myGen);
+            }, firstDelay);
+            return myGen;
+        }
+        // 唯一续期入口：代次不符说明这条链已被 halt/begin 取代，回调必须自行消失——
+        // 既不排期，也不把 timer 写成自己的 id（那正是旧链顶掉新链句柄的那一步）。
+        function renew(myGen, delay, run) {
+            if (myGen !== gen) return false;
+            timer = setTimeout(function () {
+                run(myGen);
+            }, delay);
+            return true;
+        }
+        function isCurrent(myGen) {
+            return myGen === gen;
+        }
+        return { halt: halt, begin: begin, renew: renew, isCurrent: isCurrent };
     }
 
     // 11. startSSE / stopSSE / pauseSSE（轮询实现，非真实 SSE）
@@ -734,18 +816,18 @@
     var sseFailCount = 0;
     function startSSE() {
         sseWanted = true;
-        if (sseSource) {
-            clearTimeout(sseSource);
-            sseSource = null;
-        }
         sseStopped = false;
-        sseSource = setTimeout(function poll() {
+        // M-21：begin() 内已含「清掉上一代定时器 + 推进代次」，原先那三行手写 clearTimeout 不再需要。
+        sseChain.begin(0, function poll(myGen) {
             api('/api/status')
                 .then(function (data) {
+                    // M-21：过期轮次不得渲染、也不得把退避计数复位（它属于已被取代的那条链）
+                    if (!sseChain.isCurrent(myGen)) return;
                     sseFailCount = 0;
                     renderStatus(data);
                 })
                 .catch(function () {
+                    if (!sseChain.isCurrent(myGen)) return;
                     sseFailCount += 1;
                     // SEV-2228：网络层失败（后端不可达/超时）才是「已断开」这一支；
                     // 仪表盘上的提示必须经 showStatusWarning，只写弹幕流等于没提示（见 markBackendUnreachable）。
@@ -758,9 +840,9 @@
                     if (sseFailCount > 0) {
                         delay = SSE_BACKOFF_STEPS[Math.min(sseFailCount - 1, SSE_BACKOFF_STEPS.length - 1)];
                     }
-                    sseSource = setTimeout(poll, delay);
+                    sseChain.renew(myGen, delay, poll);
                 });
-        }, 0);
+        });
     }
 
     // 放弃轮询（切离仪表盘/退出登录时调用）：连意图一起清掉，否则切回仪表盘会被
@@ -777,12 +859,10 @@
 
     // pauseSSE 与 stopSSE 的共同底座：只清在飞定时器并把状态置「已停」，
     // 是否连「想要轮询」的意图一起清掉由调用方决定（两态拆分见上方 SEV-2227 的状态声明处）。
+    // M-21：halt() 同时推进代次，故「停止 → 立即重启」窗口里落地的旧在途回调不会再排期。
     function _haltSSE() {
         sseStopped = true;
-        if (sseSource) {
-            clearTimeout(sseSource);
-            sseSource = null;
-        }
+        sseChain.halt();
     }
 
     // 仪表盘告警横幅的唯一写入口（SEV-2228 起「拿不到 / 不新鲜 / 引擎死」三类都走这里），传空串即隐藏。
@@ -937,9 +1017,14 @@
 
     // 13. loadLogs —— GET /api/logs?lines=100，取最近 100 行纯文本日志拼到 #log-stream
     // 并滚动到底部；错误被静默忽略（仪表盘轮询期间偶发失败不应闪烁界面）。
-    async function loadLogs() {
+    // M-21：isActive 由日志轮询链传入「本轮代次是否仍然有效」的判据，过期轮次直接丢弃、不写
+    // #log-stream（视图已切走时把上一视图的旧日志刷进隐藏面板没有意义）；直接调用（showView 首次
+    // 进仪表盘）不传该参数，按恒有效处理。
+    async function loadLogs(isActive) {
+        var check = typeof isActive === 'function' ? isActive : null;
         try {
             var data = await api('/api/logs?lines=100');
+            if (check && !check()) return;
             var lines = (data && data.lines) || [];
             var el = $('log-stream');
             el.textContent = lines.join('\n');
@@ -953,48 +1038,54 @@
     // #log-stream 永远是打开页面时那 100 行，「实时日志」名不副实，排查「录制为什么没起来」时看到的是
     // 几十分钟前的旧内容。节拍取 5s：日志面板本身不是秒级指标，而 /api/logs 是读文件、比 /api/status
     // 更重，没必要跟状态轮询（2s）同频。可见性感知与弹幕轮询同型：页面隐藏即停。
-    var logTimer = null;
+    // [M-21 2026-09-29] logTimer 裸变量改为 logsChain 承载（代次机制与选型理由见 10b）。
+    var logsChain = makePollChain();
     var logStopped = true;
     var LOGS_POLL_INTERVAL = 5000;
     function startLogsPolling() {
         stopLogsPolling();
         logStopped = false;
-        logTimer = setTimeout(function poll() {
-            loadLogs().then(function () {
+        logsChain.begin(LOGS_POLL_INTERVAL, function poll(myGen) {
+            loadLogs(function () {
+                return logsChain.isCurrent(myGen);
+            }).then(function () {
                 if (!logStopped) {
-                    logTimer = setTimeout(poll, LOGS_POLL_INTERVAL);
+                    logsChain.renew(myGen, LOGS_POLL_INTERVAL, poll);
                 }
             });
-        }, LOGS_POLL_INTERVAL);
+        });
     }
     function stopLogsPolling() {
         logStopped = true;
-        if (logTimer) {
-            clearTimeout(logTimer);
-            logTimer = null;
-        }
+        logsChain.halt();
     }
 
     // 13b. 弹幕监控：轮询 + 渲染（增量游标 since=seq，2 秒一次）
     // 游标只前进（last_seq 大于 dmLastSeq 才赋值）：失败轮回的是原 since，用它覆盖会让已取到的序号倒退、
     // 下一轮重复拉同一段消息。轮询只随进入/离开弹幕视图起停，与仪表盘两条轮询互不牵连。
+    // [M-21 2026-09-29] 与状态/日志两条链同机制（makePollChain，见 10b）：旧一代的请求落地后
+    // 既不再排期、也不再 renderDanmaku——后者会推进 dmLastSeq 增量游标，让一条本该作废的轮次
+    // 改动新链的续拉位置。
     function startDanmakuPolling() {
         stopDanmakuPolling();
         dmStopped = false;
-        dmTimer = setTimeout(function poll() {
-            api('/api/danmaku?since=' + dmLastSeq).then(renderDanmaku).catch(function () {}).then(function () {
-                if (!dmStopped) {
-                    dmTimer = setTimeout(poll, 2000);
-                }
-            });
-        }, 0);
+        dmChain.begin(0, function poll(myGen) {
+            api('/api/danmaku?since=' + dmLastSeq)
+                .then(function (data) {
+                    if (!dmChain.isCurrent(myGen)) return;
+                    return renderDanmaku(data);
+                })
+                .catch(function () {})
+                .then(function () {
+                    if (!dmStopped) {
+                        dmChain.renew(myGen, 2000, poll);
+                    }
+                });
+        });
     }
     function stopDanmakuPolling() {
         dmStopped = true;
-        if (dmTimer) {
-            clearTimeout(dmTimer);
-            dmTimer = null;
-        }
+        dmChain.halt();
     }
 
     // 时间戳（epoch 秒）→ HH:MM:SS
@@ -1013,7 +1104,14 @@
         }
         var cls = m.type === 'gift' ? ' dm-gift' : (m.type === 'superChat' ? ' dm-sc' : '');
         var label = m.type === 'gift' ? t('danmaku.gift') : (m.type === 'superChat' ? t('danmaku.sc') : '');
-        var dropped = m.dropped ? ' <span class="dm-dropped">(+' + m.dropped + t('danmaku.dropped') + '</span>' : '';
+        // M-23（2026-09-29）：dropped 也必须过 esc()。后端当前把折叠计数写成 int
+        //（src/danmaku_monitor.py 的 sampled/dropped 聚合），现网不可利用，但它是本函数唯一的裸插值，
+        // 违反本文件自定义的「拼接路径一律转义」不变量——契约一变（计数改成带标记的可读串、或换成
+        // 服务端拼接的文案）这里就是弹幕流里的存储型注入点，而同函数的 user/room/text 全都过了 esc()。
+        // 在「parseInt(m.dropped, 10) + NaN 兜底」与「过 esc()」之间选后者：parseInt 会把「12 条」这类
+        // 未来的可读文案静默截成 12（丢信息且无人报错），而 esc() 对 int 与字符串同时成立，
+        // 与同函数其余字段的口径一致，不需要再补 NaN 分支。
+        var dropped = m.dropped ? ' <span class="dm-dropped">(+' + esc(m.dropped) + t('danmaku.dropped') + '</span>' : '';
         var userPart = m.user ? '<span class="dm-user">' + esc(m.user) + '</span>: ' : '';
         return '<span class="dm-line' + cls + '">[' + dmFmtTime(m.ts) + '] <span class="dm-room">['
             + esc(m.room) + ']</span> ' + label + userPart + esc(m.text) + dropped + '</span>';
@@ -1490,11 +1588,85 @@
         return n;
     }
 
+    // 18b. M-22（2026-09-29）：认证复验口令的采集弹窗，替代原 window.prompt。
+    // 为什么必须换掉 prompt：
+    //   ① 它是**明文回显**的输入框——本文件其它任何口令形态（登录框 #login-password、配置页敏感项、
+    //     新增的房间 Cookie）都是 type="password"，唯独这里肩屏/截图/旁观可见；
+    //   ② 原生弹窗无法指定 type/autocomplete，口令会进浏览器的自动填充与历史候选；
+    //   ③ 它是同步阻塞 UI 线程的对话框，在 async saveConfig 里把整条提交链挂在浏览器弹窗上。
+    // 改成 index.html 里的静态节点 #reauth-modal（type="password" + autocomplete="off"）+ style.css 的
+    // .modal-* 遮罩样式：本面板没有对话框组件，登录卡片/告警横幅都是「静态节点 + .hidden 切换」，
+    // 沿用同一形态，不引入新框架、也不在运行时 createElement（那会让前端 .mjs 沙箱用例无法驱动）。
+    // 出口一律经 _settleReauth 收敛：确认取走输入值、取消/Esc/点遮罩回空串，四个出口都会立刻清空
+    // 输入节点并重新挂上 .hidden（轻微项 41 记的是「口令残留在隐藏视图里」）。
+    // 空串 = 放弃本次认证改动（与 t('config.authChangeReauth') 的「留空或取消即放弃本次改动」一致）。
+    // 开窗口期间必须禁用 #config-save-btn：window.prompt 是**阻塞**的，第二次点击根本进不来；
+    // 换成非阻塞弹窗后 saveConfig 可以被重复进入，两条链会各自走到这里互相作废 resolver
+    // （上一条 Promise 被以空串结算 → 那一轮认证键被跳过）。口令不会因此外泄（空串一律不提交），
+    // 但界面会给出「改成功了却没生效」的假象，故在源头把重入入口关掉，不靠结算顺序兜底。
+    // 与后端契约对齐（**先读 src/web_api.py::update_config 的 MID-2241 段**）：认证当前处于开启状态时，
+    // 写 [Web] web_auth_enable / web_password 必须携带能过 verify_web_password 的 reauth_password，
+    // 否则 403。所以这里不再允许「空串照常提交」——空串在前端就地跳过，不去撞那条 403，
+    // 也不给后端 _log_internal_error 留下一条必然失败的 auth_reauth_denied 告警。
+    // 反向半边（与后端同判据，见 saveConfig 的 authRecheckRequired）：认证**当前关闭**时后端不做这条
+    // 判定，前端也就该照常提交、不采口令——否则第一次启用认证的人没有旧口令可填，会被本窗口死锁。
+    var _reauthResolver = null;
+
+    function _settleReauth(value) {
+        var input = $('reauth-password');
+        var modal = $('reauth-modal');
+        // 先清 DOM、再放行调用方：resolver 一返回，saveConfig 立刻把原文拼进请求体，
+        // 此时弹窗已不可见、输入框里不应再留有任何字符。
+        if (input) input.value = '';
+        if (modal) modal.classList.add('hidden');
+        var saveBtn = $('config-save-btn');
+        if (saveBtn) saveBtn.disabled = false;
+        var resolve = _reauthResolver;
+        _reauthResolver = null;
+        if (resolve) resolve(value || '');
+    }
+
+    // 打开口令窗并等待用户输入；labelText 由调用方传入（t('config.authChangeReauth')），
+    // 使「本次要复验的是什么」与调用点保持同源，弹窗自身不猜文案。
+    function askReauthPassword(labelText) {
+        return new Promise(function (resolve) {
+            var modal = $('reauth-modal');
+            var input = $('reauth-password');
+            // 弹窗节点缺失（HTML 被裁剪/换用旧模板）时按「放弃认证改动」处理：
+            // 拿不到复验口令的 PUT 必然 403，不如在这里就不提交，绝不把空 reauth 发出去。
+            if (!modal || !input) {
+                resolve('');
+                return;
+            }
+            // saveConfig 是串行 await 的，理论上不会有上一轮还没结算；真出现（异常路径）就先作废它，
+            // 避免两个等待方互相覆盖 resolver 导致其中一条 Promise 永不落地。
+            if (_reauthResolver) _settleReauth('');
+            var label = $('reauth-modal-label');
+            if (label) label.textContent = labelText || t('config.authChangeReauth');
+            input.value = '';
+            var saveBtn = $('config-save-btn');
+            if (saveBtn) saveBtn.disabled = true;
+            modal.classList.remove('hidden');
+            _reauthResolver = resolve;
+            // 桩化 DOM（tests/frontend/*.mjs 的 node:vm 沙箱）不建模 focus，判空后再调
+            if (input.focus) input.focus();
+        });
+    }
+
     async function saveConfig() {
         var inputs = document.querySelectorAll('#config-container input');
         var count = 0;
         var skippedBlank = 0;
         var skippedAuth = 0;
+        // M-22：复验口令改为**本轮局部**状态，两个变量各有职责——
+        //   authAsked：本轮是否已经弹过口令窗（每轮保存最多采集一次，两个认证键共用同一次输入，
+        //              用户不必为「关认证 + 改口令」输两遍当前口令）；
+        //   authReauth：采集到的口令原文（'' = 取消或留空，视为放弃本次认证改动）。
+        // 原实现只有循环外的一个 authReauth：它一旦被赋值就一路留到循环结束，之后**每个**有改动的
+        // 普通配置键的 PUT 体都带 reauth_password，把口令复制进本次保存的全部请求
+        //（代理日志、浏览器扩展、后台抓包都能记下）。现在只在认证两键的请求上携带，
+        // 其余键的请求体与改动前逐字段一致（既有回归锁按整体 deepEqual 断言 body 形状）。
+        var authAsked = false;
         var authReauth = '';
         for (var i = 0; i < inputs.length; i++) {
             var inp = inputs[i];
@@ -1517,7 +1689,8 @@
             //（或被窃）bearer 的一方能把「需要凭据的面板」降级成「本机任意进程可操控的面板」，且该降级在 token
             // 吊销后依然留存。这里补上确认步骤：文案点明后果，未确认即跳过并计入 skippedAuth，末尾单独提示
             // 「已跳过 N 项认证相关改动」（不静默吞掉）。
-            if (section === 'Web' && (key === 'web_auth_enable' || key === 'web_password')) {
+            var isAuthKey = section === 'Web' && (key === 'web_auth_enable' || key === 'web_password');
+            if (isAuthKey) {
                 if (!confirm(t('config.authChangeConfirm').replace('{k}', String(key)))) {
                     skippedAuth++;
                     continue;
@@ -1527,17 +1700,39 @@
                 // reauth_password 即 403（判据见 src/web_api.py::update_config 的 MID-2241 段）。故这里的 confirm
                 // + prompt 只挡手滑、不是唯一防线，但仍保留：直连接口的调用方由 403 挡住。取消（null）视为放弃。
                 // [历史注 2026-09-22 版曾写「后端不据它做准入判定、强复验已回退」，该状态已被推翻。]
-                authReauth = window.prompt(t('config.authChangeReauth'), '');
-                if (authReauth === null) {
-                    skippedAuth++;
-                    continue;
+                // [M-22 2026-09-29] 采集形态由 window.prompt 换成 askReauthPassword() 的 password 弹窗；
+                // 「取消视为放弃」的结论不变，只是取消的返回值从 null 收敛为空串（见 18b）。
+                // 每轮保存最多采集一次：两个认证键共用同一次输入（同一份「当前口令」），
+                // 用户取消则两个键一起跳过，不再重复弹窗骚扰。
+                // 采集与否的判据必须与后端**同一条**：src/web_api.py::update_config 只在
+                // 「认证当前已开启」时强制复验（它写明的理由——认证关闭时面板对任何能访问端口的人都全开、
+                // 根本没有可信的「当前口令」可验，强复验只会把「按提示收紧配置」打死）。
+                // 前端若无条件要求非空口令，就正好复刻那个死锁：第一次打开认证时磁盘上没有旧口令可填，
+                // 留空 = 放弃 → web_auth_enable 永远改不出去。判据取 configBackup（= 服务端真值快照），
+                // 布尔解析走本文件既有的 parseConfigBool（与后端 config_bool 同 token 集合）。
+                var authRecheckRequired = parseConfigBool(
+                    (configBackup && configBackup.Web) ? configBackup.Web.web_auth_enable : '', false
+                );
+                if (authRecheckRequired) {
+                    if (!authAsked) {
+                        authAsked = true;
+                        authReauth = await askReauthPassword(t('config.authChangeReauth'));
+                    }
+                    if (!authReauth) {
+                        skippedAuth++;
+                        continue;
+                    }
                 }
             }
             try {
                 // MID-2241：按需附加 reauth_password —— 只在认证两键被确认后才带上，
                 // 其余配置键的请求体保持与改动前**逐字段一致**（既有回归锁按整体 deepEqual 断言请求体）。
+                // M-22 收紧：判据从「authReauth 非空」改成「这一行本身就是认证键」——原写法是循环外的
+                // 粘变量，认证行赋值之后每个键都被捎带上传口令，deepEqual 锁不住这种泄漏（键集合本身
+                // 变了才算红，而这里是**多余字段**出现在别的请求上；该形态已由
+                // tests/frontend/test_auth_reauth.mjs 的行为用例逐请求断言）。
                 var body = { section: section, key: key, value: newVal };
-                if (authReauth) body.reauth_password = authReauth;
+                if (isAuthKey && authReauth) body.reauth_password = authReauth;
                 await api('/api/config', {
                     method: 'PUT',
                     body: body,
@@ -1771,6 +1966,32 @@
             }
         });
         $('config-save-btn').addEventListener('click', saveConfig);
+        // M-22：口令窗的四个出口全部经 _settleReauth（清空输入节点 + 隐藏弹窗 + 放行 saveConfig），
+        // 少绑一个就会把已输入的口令留在隐藏的 #reauth-password 里（轻微项 41 的那类残留）。
+        $('reauth-confirm').addEventListener('click', function () {
+            var input = $('reauth-password');
+            _settleReauth(input ? input.value : '');
+        });
+        $('reauth-cancel').addEventListener('click', function () {
+            _settleReauth('');
+        });
+        // Enter 提交、Esc 取消：口令窗只有一个输入框，键盘路径必须与鼠标路径同结论
+        $('reauth-password').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter' || e.keyCode === 13) {
+                _settleReauth(e.target ? e.target.value : $('reauth-password').value);
+            }
+        });
+        document.addEventListener('keydown', function (e) {
+            if (!_reauthResolver) return;
+            if (e.key === 'Escape' || e.keyCode === 27) {
+                _settleReauth('');
+            }
+        });
+        // 点遮罩空白处 = 取消（必须判 target 就是遮罩本身：卡片内的任何点击都会冒泡到这里，
+        // 若在卡片上点一下就把口令交回调用方，等于凭空多出一个「误提交」出口）
+        $('reauth-modal').addEventListener('click', function (e) {
+            if (e && e.target && e.target === $('reauth-modal')) _settleReauth('');
+        });
         $('danmaku-room-filter').addEventListener('change', dmRenderStream);
         $('danmaku-clear-btn').addEventListener('click', function () {
             dmMessages = [];

@@ -3,6 +3,10 @@
 // 与 test_quality_ui.mjs 的分工：那边是「既有质量门禁」（四语目录、parseConfigBool 跨语言不变量、
 // 掩码写入、登出等）；本文件只放本轮修复对应的**失效形态**锁，每条都能在把对应修复改回原样时变红。
 //
+// [2026-09-29 组 G 续锁] CODE_REVIEW_2026-09-29_2 的 M-21（轮询代次竞态）/ M-23（dropped 转义）/
+// M-26（认证复验假绿锁改写）三条一并落在本文件：M-21/M-23 需要这里的「可控定时器队列 + 可停在
+// 半路的 fetch」（makeInflight），M-22 的口令窗行为另在 tests/frontend/test_auth_reauth.mjs。
+//
 // 沙箱策略与 test_quality_ui.mjs 同源（vm + 自制 DOM/fetch/定时器桩，无 npm 依赖），
 // 但本文件需要「可控定时器」：SEV-2227 的失效形态是「隐藏后 setTimeout 永不再排」，
 // 用 no-op 定时器根本观察不到，故改为可手动推进的假定时器队列。
@@ -15,6 +19,9 @@ const APP_JS = readFileSync(new URL('../../web/app.js', import.meta.url), 'utf8'
 const INDEX_HTML = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
 const ROOT_INDEX_HTML = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
 const WEB_API_PY = readFileSync(new URL('../../src/web_api.py', import.meta.url), 'utf8');
+// 阶段2（FastAPI → Starlette）后请求模型（含 ConfigUpdate.reauth_password）搬到 src/web_models.py，
+// 字段级断言改扫该文件；update_config 端点本体仍在 web_api.py。
+const WEB_MODELS_PY = readFileSync(new URL('../../src/web_models.py', import.meta.url), 'utf8');
 // SEV-2221 撤销锁要核对 main.py 里到底有没有轮次计数器（判据见该用例），
 // 读原文而不猜：本文件已有「读生产源码做源码级断言」的先例（WEB_API_PY / APP_JS）。
 const MAIN_PY = readFileSync(new URL('../../main.py', import.meta.url), 'utf8');
@@ -106,6 +113,7 @@ function makeResponse(status, data) {
 
 // routes 键为 "METHOD path"，值为对象或 (callIndex) => 对象；path 含 query 时按前缀匹配失败，
 // 故调用方须写全（本文件用到的 path 都是固定的）。
+// spec.gate 存在时（M-21 用例，见 makeInflight）响应体要等 gate 落地才返回，用来把请求「停在半路」。
 function makeFetch(routes, log) {
     return async (path, init) => {
         init = init || {};
@@ -114,8 +122,59 @@ function makeFetch(routes, log) {
         const route = routes[method + ' ' + path] || routes[method + ' ' + path.split('?')[0]];
         if (!route) return makeResponse(404, { detail: 'no test route for ' + method + ' ' + path });
         const spec = typeof route === 'function' ? route(log.length) : route;
+        if (spec.gate) {
+            const status = spec.status || 200;
+            const body = JSON.stringify(spec.json || {});
+            return {
+                status,
+                ok: status >= 200 && status < 300,
+                headers: { get: () => 'application/json' },
+                text: async () => {
+                    await spec.gate;
+                    return body;
+                },
+            };
+        }
         return makeResponse(spec.status || 200, spec.json || {});
     };
+}
+
+// —— M-21 用例专用：可「停在半路」的 fetch 路由 ————————————————
+// 每次调用返回一个 text() 等外部 Promise 的响应，由测试用 releaseNext() 精确放行「第 k 次在途请求
+// 落地」这一刻。「停止 → 立即重启」的竞态只有在**旧请求晚于新链启动**才落地时才暴露，
+// 普通 fetch 桩（当轮即回）根本制造不出这个时刻，故必须把在途请求做成测试可控的对象。
+// jsonFor 传函数时按调用序号（本路径内从 1 计）取载荷，用于让「过期那一轮」带回可辨识的数据。
+function makeInflight(jsonFor) {
+    const waiting = [];
+    let calls = 0;
+    const route = () => {
+        calls += 1;
+        let release;
+        const gate = new Promise(resolve => {
+            release = resolve;
+        });
+        waiting.push(release);
+        const payload = typeof jsonFor === 'function' ? jsonFor(calls) : jsonFor;
+        return { json: payload, gate };
+    };
+    return {
+        route,
+        calls: () => calls,
+        inflight: () => waiting.length,
+        async releaseNext() {
+            const release = waiting.shift();
+            if (!release) throw new Error('没有可放行的在途请求（用例前提失效）');
+            release();
+            await flushMicrotasks();
+        },
+    };
+}
+
+// 点某个 tab（不推进定时器）：M-21 用例要在「新链已排期、旧请求仍在途」这一刻停住，
+// 不能用 gotoDashboard/gotoDanmaku（它们附带一次 tick）。
+function clickTab(ctx, view) {
+    const tab = ctx.tabs.find(t => t.getAttribute('data-view') === view);
+    tab._listeners.click[0].call(tab);
 }
 
 async function flushMicrotasks(rounds) {
@@ -437,6 +496,34 @@ test('SEV-2228 后半：danmaku_unavailable 不得推进增量游标（否则跳
 });
 
 
+// —— M-23（2026-09-29）：弹幕折叠计数也必须过 esc()，拼接路径不得留裸插值 ——————
+
+test('M-23：/api/danmaku 的 dropped 计数进 innerHTML 前必须转义（拼接路径一律 esc 的不变量）', async () => {
+    // 失效形态：dmLineHtml 里 user/room/text 全过 esc()，唯独 `(+' + m.dropped + '` 是裸插值。
+    // 后端当前把 dropped 写成 int（src/danmaku_monitor.py 的采样折叠计数），现网不可利用，
+    // 但契约一变（计数改成带标记的可读串、或改由服务端拼文案）这里就是弹幕流的存储型注入点。
+    // 本用例按「字符串形态的 dropped」喂，直接锁住转义这一层，不依赖后端今天写什么类型。
+    const hostile = '<img src=x onerror=alert(1)>';
+    const ctx = await boot({
+        routes: {
+            'GET /api/danmaku': {
+                json: {
+                    rooms: [{ name: 'r1', platform: '抖音直播', connected: true, msg_total: 1, msg_rate: 1, gift_total: 0, online: 1, started_at: '' }],
+                    messages: [{ ts: 1700000000, room: 'r1', type: 'chat', user: 'u1', text: 'hello', dropped: hostile }],
+                    last_seq: 1,
+                    truncated: false,
+                },
+            },
+        },
+    });
+    await gotoDanmaku(ctx);
+    const html = ctx.elements.get('danmaku-stream').innerHTML;
+    assert.ok(html.includes('&lt;img'), 'dropped 未转义（渲染出的 innerHTML 里没有实体化的 <img）: ' + html);
+    assert.ok(!html.includes('<img'), 'dropped 以裸插值进了 innerHTML —— 弹幕流存储型注入点');
+    // 同函数其余字段的转义口径不得被「顺手优化」掉
+    assert.ok(html.includes('r1') && html.includes('hello'), '用例前提失效：该行没渲染出来');
+});
+
 // —— SEV-2227：visibilitychange 后轮询必须自愈 ————————————————
 
 test('SEV-2227：隐藏后回到前台，/api/status 轮询继续增长（不得永久停摆）', async () => {
@@ -534,6 +621,100 @@ test('MID-2240：页面隐藏时日志轮询一并停止', async () => {
     await tick(ctx);
     assert.equal(ctx.fetchLog.filter(r => r.path.startsWith('/api/logs')).length, before,
         '页面隐藏期间仍在拉日志');
+});
+
+// —— M-21（2026-09-29）：轮询链的「停止 → 立即重启」竞态 ——————————————————
+//
+// 失效形态（详见 web/app.js 的 10b makePollChain 头注释）：stop* 只能 clearTimeout 掉**已排期**的
+// 定时器，取消不了**在途**请求；旧请求落地后的续期回调只看一个布尔标志，而「停止 → 立即重启」
+// 已把标志重新置回「在跑」——于是旧链在自己的回调里再排一次 setTimeout，并把模块级 timer 变量
+// 顶掉，两条链只剩一条可被 stop* 回收，另一条持续发请求直到下一次完整 stop。
+// 三条链（/api/status、/api/logs、/api/danmaku）各锁一条：机制共用一份（makePollChain），
+// 但代次是每链各自的，只修一条时另外两条仍会红。
+
+test('M-21：状态轮询在「隐藏 → 立即回前台」里落地的在途请求不得排出第二条轮询链', async () => {
+    const status = makeInflight({ monitoring: 1, recording_count: 0, recording: [] });
+    const ctx = await boot({ routes: { 'GET /api/status': status.route, ...LOGS_ROUTE } });
+    // 引导期 starter 的那次 /api/status 成功后才会 showView('dashboard') 起链，先放行它
+    await status.releaseNext();
+    await tick(ctx);
+    assert.ok(status.calls() >= 2, `用例前提失效：仪表盘轮询未起来（只调了 ${status.calls()} 次）`);
+    const inFlightBefore = status.inflight();
+    assert.equal(inFlightBefore, 1, '用例前提失效：应恰有一个在途 /api/status 请求');
+
+    // 隐藏 → 立即回前台：pauseSSE(bump 代次) + startSSE(起新链)，而上面那个请求**还没落地**
+    ctx.document.hidden = true;
+    ctx.fire('visibilitychange');
+    ctx.document.hidden = false;
+    ctx.fire('visibilitychange');
+    // 旧一代此刻落地：健康实现里它既不渲染、也不续期
+    await status.releaseNext();
+
+    const before = status.calls();
+    await tick(ctx);
+    assert.equal(
+        status.calls() - before,
+        1,
+        `一轮推进发了 ${status.calls() - before} 次 /api/status（应为 1）—— 旧链未被回收，两条链并存`
+    );
+});
+
+test('M-21：日志轮询在「切离仪表盘 → 立即切回」里落地的在途请求不得排出第二条轮询链', async () => {
+    const logs = makeInflight({ lines: ['line'] });
+    const ctx = await boot({ routes: { ...STATUS_ROUTE, 'GET /api/logs': logs.route } });
+    // 引导期 showView('dashboard') 里那次**直接** loadLogs() 也命中本路由：先放行它，
+    // 剩下的那个在途请求才是日志链的一轮（只有它的续期回调会被代次判据拦住）。
+    await logs.releaseNext();
+    await tick(ctx);
+    assert.equal(logs.inflight(), 1, '用例前提失效：日志链未留下一个在途请求');
+
+    // 切到配置视图（stopLogsPolling）再立刻切回仪表盘（startLogsPolling）：上面那个请求仍未落地。
+    // 这里刻意走 tab 切换而不是 visibilitychange——桩里的 document.querySelector('.view:not(.hidden)')
+    // 返回的是**数组**，而 app.js 按单个元素读 visibleView.id，故「回前台重启日志/弹幕链」这条分支
+    // 在本文件的沙箱里根本命中不了（既有 MID-2240「页面隐藏时日志轮询一并停止」只锁隐藏侧，
+    // 因此一直没人发现）。属既有的桩保真度缺口，见本次报告，不在这里顺手改桩。
+    clickTab(ctx, 'config');
+    clickTab(ctx, 'dashboard');
+    await logs.releaseNext();
+
+    const before = logs.calls();
+    await tick(ctx);
+    assert.equal(
+        logs.calls() - before,
+        1,
+        `一轮推进发了 ${logs.calls() - before} 次 /api/logs（应为 1）—— /api/logs 是读文件，双链会成倍放大磁盘压力`
+    );
+});
+
+test('M-21：弹幕轮询重进视图时在途请求落地不得排出第二条链，也不得推进增量游标', async () => {
+    // 第 1 次调用（将成为过期那一轮）带回可辨识的载荷：last_seq=42 与一个专属房间名
+    const dm = makeInflight(call =>
+        call === 1
+            ? { rooms: [{ name: 'stale-room', platform: '抖音直播' }], messages: [], last_seq: 42 }
+            : { rooms: [], messages: [], last_seq: 42 }
+    );
+    const ctx = await boot({ routes: { 'GET /api/danmaku': dm.route } });
+    await gotoDanmaku(ctx);
+    assert.equal(dm.inflight(), 1, '用例前提失效：应恰有一个在途 /api/danmaku 请求');
+
+    // 重进弹幕视图：showView 先 stopDanmakuPolling 再 startDanmakuPolling（新链已排期，旧请求在途）
+    clickTab(ctx, 'danmaku');
+    assert.equal(ctx.timers.pending.size, 1, '用例前提失效：新链应恰好排了一个定时器');
+    await dm.releaseNext();
+
+    // ① 不得再排期：队列里仍只有新链那一个定时器
+    assert.equal(
+        ctx.timers.pending.size,
+        1,
+        `旧一代落地后排了 ${ctx.timers.pending.size} 个定时器（应为 1）—— 两条弹幕链并存且只有一条可被回收`
+    );
+    // ② 过期轮次不得推进游标：下一条请求必须仍是 since=0，而不是被 stale 响应的 last_seq=42 带走
+    const pathsBefore = ctx.fetchLog.filter(r => r.path.startsWith('/api/danmaku')).length;
+    await tick(ctx);
+    const paths = ctx.fetchLog.filter(r => r.path.startsWith('/api/danmaku')).map(r => r.path);
+    assert.equal(paths.length, pathsBefore + 1, '一轮推进应恰好多发一条 /api/danmaku 请求');
+    assert.equal(paths[paths.length - 1], '/api/danmaku?since=0',
+        '过期轮次把增量游标推进到 42 —— 42 之前取到的消息会被新链跳过');
 });
 
 // —— MID-2253：已翻译模板不得混入中文常量值 ————————————————
@@ -701,25 +882,44 @@ test('MID-2241：saveConfig 对 Web 认证两键先 confirm 再要求复验口�
         '请求体基础形状被改动（会破坏其余配置键的既有请求契约）');
 });
 
-test('MID-2241：后端 update_config 不得对认证两键做**强制**复验（既有契约不可打死）', () => {
-    // 2026-09-22 定稿形态：本条的防线落在前端二次确认（上一条用例），后端只接收 reauth_password
-    // 而**不据它做准入判定**。曾一度把「认证当前开启 ⇒ 缺字段即 403」实现在 update_config 里，
-    // 被 tests/test_web_api.py 的 10 个既有用例否决：
-    //   TestAuthDowngradeRejected::test_downgrade_on_loopback_allowed、
-    //   TestInsecureBindInvariantUsesRealAddress::test_two_step_sequence_allowed_when_real_bind_is_loopback、
-    //   TestPasswordManagement::test_password_change_revokes_tokens / test_new_password_stored_hashed、
-    //   TestSensitiveValueBlankRejected::test_mask_sensitive_value_rejected[Web-web_password-***]
-    // 等（详情见 src/web_api.py::ConfigUpdate.reauth_password 注释）。
-    // 本用例锁的是**不许回退到强复验**：一旦有人重新加回那段 403，这里立刻变红。
-    assert.match(WEB_API_PY, /reauth_password:\s*str\s*\|\s*None\s*=\s*None/,
-        'ConfigUpdate 缺少 reauth_password 可选字段（前端确认链的载荷载体）');
-    const fn = WEB_API_PY.match(/def update_config\(req: ConfigUpdate\)[\s\S]*?\n    @app\.get\("\/api\/language"\)/);
-    assert.ok(fn, '未找到 update_config');
+test('M-22/M-26：认证两键的复验口令经 password 弹窗采集、且只随认证键下发（正向锁）', () => {
+    // 契约事实源是生产代码：src/web_api.py::update_config 的 MID-2241 段**已实现强制复验**
+    //（认证当前开启时写 [Web] web_auth_enable / web_password 不带能过 verify_web_password 的
+    // reauth_password 即 403）。本条因此由「锁后端不许判定」翻转为「锁前端确实采集并下发」。
+    // [历史注 2026-09-29，M-26] 本条原形态是两条 doesNotMatch 文本锁，钉的是旧形状
+    // verify_web_password(_reauth, _stored) 与旧 403 文案「修改认证配置需复验当前口令」；生产实际
+    // 形状是 (_reauth, _stored_pwd) + 「修改 Web 认证配置必须复验…」，字面不一致 → 两条断言
+    // **空洞成立**（实测 32/32 全绿，而 Python 侧锁的恰是相反的新契约，两侧互相矛盾）。
+    // 这正是「钉源码字面量的安全文本锁在契约反转时静默失效」的实证，故：
+    //   ① 不再以 doesNotMatch(/后端源码字面量/) 的形态锁任何安全边界；
+    //   ② 后端行为**不在本文件复制**——已由 tests/test_regression_2026_09_22_web_g.py 的
+    //      TestAuthKeyReauth 与 tests/test_web_api.py::TestAuthDowngradeRejected 用真实端点 E2E 锁住，
+    //      在 mjs 里再实现一份判定就是两侧漂移的成因（AGENTS「测试不得自实现被测逻辑」）；
+    //   ③ 前端留下这条正向断言（去掉下发即红，见本次变异验证），端到端行为另见
+    //      tests/frontend/test_auth_reauth.mjs。
+    const fn = APP_JS.match(/async function saveConfig\(\) \{[\s\S]*?\n    \}/);
+    assert.ok(fn, '未找到 saveConfig');
     const body = fn[0];
-    assert.doesNotMatch(body, /verify_web_password\(_reauth, _stored\)/,
-        '后端又加回了强复验（会打死既有 test_web_api.py 契约，并让 web_password=*** 的 400 被 403 抢占）');
-    assert.doesNotMatch(body, /修改认证配置需复验当前口令/,
-        '后端强复验的 403 文案仍在 update_config 内');
+    const guardIdx = body.search(/key === 'web_auth_enable'/);
+    assert.ok(guardIdx >= 0, 'saveConfig 里已没有认证两键的判定（正向锁的前提失效）');
+    const confirmIdx = body.indexOf("confirm(t('config.authChangeConfirm')", guardIdx);
+    assert.ok(confirmIdx > guardIdx, '认证两键改动未弹二次确认');
+    const askIdx = body.indexOf('askReauthPassword(', guardIdx);
+    assert.ok(askIdx > confirmIdx, '认证两键改动未采集复验口令（复验链断在确认之后）');
+    // 下发：既要有赋值，也要落在「本行是认证键」的守卫之下——M-22 的失效形态正是循环外粘变量
+    // （一旦赋值，本次保存的其余配置键 PUT 都带 reauth_password，口令暴露面被扩大）
+    assert.match(body, /body\.reauth_password\s*=\s*authReauth/, '复验口令未随请求下发');
+    assert.match(body, /if \(isAuthKey && authReauth\)/,
+        'reauth_password 的下发不再以「本行是认证键」为判据 → 会被其余配置键捎带');
+    // 采集形态：saveConfig 内不得再有 window.prompt（明文回显的口令采集，面板唯一一处）。
+    // 判据剥掉行注释后再看——本函数的沿革注释里就写着「采集形态由 window.prompt 换成 askReauthPassword」，
+    // 不剥注释会把注释里的旧形态名当成代码命中（同文件 downloadFile 那条用例的既有口径）。
+    const code = body.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+    assert.ok(!code.includes('window.prompt'),
+        'saveConfig 又用回 window.prompt 采集复验口令（M-22 回归：必须走 type="password" 弹窗）');
+    // 载荷字段仍存在（正向 presence 断言：字段没了前端的 reauth 就会被后端静默丢弃 → 永远 403）
+    assert.match(WEB_MODELS_PY, /reauth_password:\s*str\s*\|\s*None\s*=\s*None/,
+        'ConfigUpdate 缺少 reauth_password 可选字段（强制复验契约的载荷载体）');
 });
 
 // —— MIN-2241：根 index.html 的远端脚本必须钉内容（SRI），钉版本不足以挡替换 ————————

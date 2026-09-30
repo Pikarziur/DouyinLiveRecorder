@@ -538,14 +538,19 @@ jobs:
           echo "pytest warnings summary 为空"
 
       # MID-2264 的第二道防线：断言前端 .mjs 用例的 pytest 包装**真的执行过**（不是被整体 skip）。
-      # 两个包装模块（tests/test_frontend_quality_ui.py 驱动 test_quality_ui.mjs；
-      # tests/test_frontend_regression_gates.py 驱动 2026-09-22 组 G 回归锁 .mjs）在 node 缺失时
+      # 四个包装模块（tests/test_frontend_quality_ui.py 驱动 test_quality_ui.mjs；
+      # tests/test_frontend_regression_gates.py 驱动 2026-09-22 组 G 回归锁 .mjs；
+      # tests/frontend/test_motion.py 驱动 web/motion.js 的动效降级/清理锁 .mjs；
+      # tests/frontend/test_auth_reauth.py 驱动认证复验口令窗的 .mjs）在 node 缺失时
       # 按「环境限制口径」整体 skip（AGENTS「前端用例」条目），而 ci-summary 分不清 skipped 与
       # passed —— 面板侧断言（含 web/app.js 里 saveConfig 跳过 '***' 掩码这条写入侧唯一防线）会静默消失。
-      # 故本步显式跑这两条 node 驱动入口并断言无 skip。
+      # 故本步显式跑这几条 node 驱动入口并断言无 skip。
+      # M-28（2026-09-29）事故成因：test_motion.mjs 此前既无 .py 包装、也不在本清单里，而
+      # `node --test <文件>` 只跑被点名的那一个文件、不会顺带发现同级其他 .mjs，于是 web/motion.js
+      # 的降级/清理回归锁在正常 CI 中从不执行——必须显式加进下方 pytest 的 node-id 清单才闭合。
       # 用 node-id 精确选取而非整模块：test_frontend_quality_ui.py 里另有两条 tasklist 存活探针用例带
       # `skipif(sys.platform != "win32")`，在 ubuntu 上必然 skip——整模块跑会让下面的「有 skip 即红」
-      # 判据被这两条平台专属用例误触发（本 job 全程跑在 ubuntu）。只点名这两条「装了 node 就该跑」
+      # 判据被这两条平台专属用例误触发（本 job 全程跑在 ubuntu）。只点名这几条「装了 node 就该跑」
       # 的入口，平台无关，判据才干净。
       - name: Gate frontend tests not skipped
         shell: bash
@@ -555,6 +560,8 @@ jobs:
           if ! out=$(python -m pytest \
             tests/test_frontend_quality_ui.py::test_frontend_quality_ui \
             tests/test_frontend_regression_gates.py::test_frontend_regression_gates \
+            tests/frontend/test_motion.py::test_motion_frontend \
+            tests/frontend/test_auth_reauth.py::test_auth_reauth \
             -q -rs 2>&1); then
             printf '::error::前端用例执行失败：\n%s\n' "$out"
             exit 1
@@ -620,6 +627,11 @@ jobs:
           label: Web 面板 HTTP 冒烟（启动 + 就绪等待 + 接口断言）
           attempts: "2"
           backoff: "5"
+          # 2-A：scripts/_ci_web_smoke.sh 忠实透传 smoke_test.py 的退出码（0 通过 / 1 面板故障
+          # 可重试 / 2 配置形态畸形）。配置类错误重试无意义（下一轮仍读到同一份坏配置），
+          # 命中 2 即带原退出码立刻失败；1（冷启动慢 / 瞬时 HTTP 抖动）仍按上面的 attempts
+          # 重试。本文件其余 retry 调用点不传该 input → 列表恒空 → 行为与改动前逐字一致。
+          fail_fast_codes: "2"
           command: >-
             DOUYIN_SKIP_RUNTIME_CHECK=1 DOUYIN_DISABLE_LOG_ARCHIVE=1
             bash scripts/_ci_web_smoke.sh

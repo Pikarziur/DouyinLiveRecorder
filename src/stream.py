@@ -652,9 +652,20 @@ async def get_tiktok_stream_url(
         flv_url_list = [x for x in flv_url_list if x and x.get("url")]
         m3u8_url_list = [x for x in m3u8_url_list if x and x.get("url")]
         video_quality, quality_index = get_quality_index(video_quality)
-        quality_index = min(quality_index, len(flv_url_list) - 1) if flv_url_list else 0
+        # M-11 修复（2026-09-29 审查）：quality_index 一律保留「用户请求档」原始值、不被 FLV 列表覆写，
+        # FLV 与 HLS 各自基于原始索引独立钳制——与本文件上方抖音分支（flv_idx / m3u8_idx 两行）同口径。
+        # [历史注] 原写法 `quality_index = min(quality_index, len(flv_url_list) - 1) if flv_url_list else 0`
+        # 之后再把**被钳过**的值喂给 m3u8_quality_index，两重失效面：
+        #   ① HLS-only 房间（上方过滤后 flv_url_list 恒空）quality_index 被无条件归零 → 用户选任何档位
+        #      都拉码率最高的首档，且 actual_quality 回采到高档后 main.py 的 `_is_downgrade` 恒假
+        #      （高档不算降级）→「选流畅实拉原画」完全静默，白烧带宽；
+        #   ② 两侧过滤后长度不等（_pad_list 补到 6 再滤掉空地址项，可短于 6）时 HLS 被 FLV 的长度二次
+        #      截断，请求低档实拉高档。
+        # 现改为引入 flv_quality_index / m3u8_quality_index 两个局部钳制值，索引不再被写回 quality_index，
+        # 下方「探针失败后的回退分支」同样以原始请求索引为基准（fallback_base），避免同一污染在回退路径复现。
+        flv_quality_index = min(quality_index, len(flv_url_list) - 1) if flv_url_list else 0
         m3u8_quality_index = min(quality_index, len(m3u8_url_list) - 1) if m3u8_url_list else 0
-        flv_dict: StreamQuality | dict[str, str] = flv_url_list[quality_index] if flv_url_list else {"url": ""}
+        flv_dict: StreamQuality | dict[str, str] = flv_url_list[flv_quality_index] if flv_url_list else {"url": ""}
         m3u8_dict: StreamQuality | dict[str, str] = m3u8_url_list[m3u8_quality_index] if m3u8_url_list else {"url": ""}
 
         check_url = cast(str, m3u8_dict.get("url") or flv_dict.get("url"))
@@ -671,13 +682,13 @@ async def get_tiktok_stream_url(
             )
 
         if not ok:
-            fallback_index = quality_index + 1 if quality_index < 4 else max(quality_index - 1, 0)
+            # M-11 配套：回退基准取自原始请求档（fallback_base），两侧各自按自己的长度钳制，
+            # 不得再把 FLV 钳过的下标当作 HLS 的基准（与主选档同一污染形态）。
+            fallback_base = quality_index + 1 if quality_index < 4 else max(quality_index - 1, 0)
             if flv_url_list:
-                fallback_index = min(fallback_index, len(flv_url_list) - 1)
-                flv_dict = flv_url_list[fallback_index]
+                flv_dict = flv_url_list[min(fallback_base, len(flv_url_list) - 1)]
             if m3u8_url_list:
-                m3u8_fallback = min(fallback_index, len(m3u8_url_list) - 1)
-                m3u8_dict = m3u8_url_list[m3u8_fallback]
+                m3u8_dict = m3u8_url_list[min(fallback_base, len(m3u8_url_list) - 1)]
 
         flv_url = cast(str, flv_dict.get("url", ""))
         m3u8_url = cast(str, m3u8_dict.get("url", ""))

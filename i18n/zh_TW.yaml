@@ -10,6 +10,7 @@ All download methods failed. Please manually install ffmpeg by yourself.: 所有
 'An error occurred during login: {e}': '登錄過程中發生錯誤: {e}'
 'An exception occurred during get_live_room_id: {e}': '獲取直播間ID時發生異常: {e}'
 'An exception occurred during popkontv login: {e}': 'popkontv登錄過程中發生異常: {e}'
+"An exception occurred during popkontv login: {type_name}: {e}": "popkontv登錄過程中發生異常: {type_name}: {e}"
 'An unexpected error occurred:': 發生未知錯誤：
 An unknown error occurred: 發生未知錯誤
 Attempting to log in to TwitCasting...: TwitCasting正在嘗試登錄...
@@ -771,6 +772,7 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "ffmpeg master 解压失败: {type_name}: {e}": "ffmpeg master 解壓失敗: {type_name}: {e}"
 "ffmpeg.exe not found in master package": "master 安裝包中未找到 ffmpeg.exe"
 "get_response_status 拒绝内网/保留目标（疑似被篡改的流地址）: {masked_url} - {reason}": "get_response_status 拒絕內網/保留目標（疑似被竄改的流地址）: {masked_url} - {reason}"
+"探针拒绝内网/保留目标（疑似被篡改的流地址）: {masked_url} - {reason}": "探針拒絕內網/保留目標（疑似被竄改的流地址）: {masked_url} - {reason}"
 "ntfy推送失败, 推送地址：{masked_api}, 错误信息: {type_name}: {e}": "ntfy推送失敗, 推送位址：{masked_api}, 錯誤訊息: {type_name}: {e}"
 "tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息: {type_name}: {e}": "tg推送失敗, 聊天ID：{chat_id}, 推送位址：{masked_url}, 錯誤訊息: {type_name}: {e}"
 "{count} 个 ffmpeg 进程已保留在注册表中待下次清理（确认未能终止 {failed_count} 个、未确认 {unconfirmed_count} 个）": "{count} 個 ffmpeg 進程已保留在註冊表中待下次清理（確認未能終止 {failed_count} 個、未確認 {unconfirmed_count} 個）"
@@ -786,6 +788,9 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "回退到 os.devnull 也失败: {type_name}: {e}": "回退到 os.devnull 也失敗: {type_name}: {e}"
 "小红书短链落地页不可信，已忽略跳转: {url} ({reason})": "小紅書短鏈落地頁不可信，已忽略跳轉: {url} ({reason})"
 "小红书短链跳转到非白名单主机，已忽略跳转: {url}": "小紅書短鏈跳轉到非白名單主機，已忽略跳轉: {url}"
+"Shopee 短链落地页不可信，已忽略跳转: {url} ({reason})": "Shopee 短鏈落地頁不可信，已忽略跳轉: {url} ({reason})"
+"Shopee 短链跳转到非白名单主机，已忽略跳转: {url}": "Shopee 短鏈跳轉到非白名單主機，已忽略跳轉: {url}"
+"Shopee 接口域名不在白名单内，本轮按未开播返回: {host}": "Shopee 接口域名不在白名單內，本輪按未開播返回: {host}"
 "小红书解析失败，且本次使用的是内置会话 sid（可能已过期）；请在 config.ini 的 [Cookie] xhs_session_sid 配置有效 sid（或设置环境变量 XHS_SESSION_SID）": "小紅書解析失敗，且本次使用的是內建會話 sid（可能已過期）；請在 config.ini 的 [Cookie] xhs_session_sid 配置有效 sid（或設置環境變數 XHS_SESSION_SID）"
 "已启用": "已啟用"
 "平台解析或凭据回写失败（本轮按未识别处理）: {record_url} - {type_name}: {e}": "平臺解析或憑據回寫失敗（本輪按未識別處理）: {record_url} - {type_name}: {e}"
@@ -821,3 +826,17 @@ tg推送失败, 聊天ID：{chat_id}, 推送地址：{masked_url}, 错误信息:
 "配置文件已保存！": "設定檔已保存！"
 "重连超过最大次数，与服务器断开连接: {reason}": "重連超過最大次數，與伺服器中斷連線: {reason}"
 "钉钉推送失败, 推送地址：{masked_api}, 错误信息: {type_name}: {e}": "釘釘推送失敗, 推送位址：{masked_api}, 錯誤訊息: {type_name}: {e}"
+"界面主题": "介面主題"
+"浅色": "淺色"
+"深色": "深色"
+"高对比度": "高對比"
+"界面主题已切换: {theme}": "介面主題已切換: {theme}"
+"界面主题已切换为 {theme}，但配置写回失败": "介面主題已切換為 {theme}，但設定寫回失敗"
+"界面主题已切换为 {theme}，但配置写回失败: {type_name}: {err}": "介面主題已切換為 {theme}，但設定寫回失敗: {type_name}: {err}"
+"界面主题": "介面主題"
+"浅色": "淺色"
+"深色": "深色"
+"高对比度": "高對比"
+"界面主题已切换: {theme}": "介面主題已切換: {theme}"
+"界面主题已切换为 {theme}，但配置写回失败": "介面主題已切換為 {theme}，但設定寫回失敗"
+"界面主题已切换为 {theme}，但配置写回失败: {type_name}: {err}": "介面主題已切換為 {theme}，但設定寫回失敗: {type_name}: {err}"

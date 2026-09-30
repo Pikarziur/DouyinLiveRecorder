@@ -4,7 +4,7 @@
 import asyncio
 import re
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import cast
 from urllib.parse import urlparse
 
@@ -71,12 +71,20 @@ def _build_client(
     http2: bool,
 ) -> httpx.AsyncClient:
     # 构造一支新的 AsyncClient；构造放在锁外（httpx.AsyncClient.__init__ 涉及传输层初始化）。
+    # M-1（2026-09-29 审查 WP-B）：逐跳复检钩子在**这里、也是唯一一处**随客户端挂上。缓存里每支
+    # 客户端都出自本函数（_get_client 与 _acquire_client 的独占分支都调它），于是 async_req 的
+    # GET + 三条 POST 分支、get_response_status 的 HEAD + Range-GET 全部自动被覆盖，判定不必
+    # 在调用点复制第二份（见 _redirect_hop_rejection_reason）。
+    # 闭包只多带一个信息：本次出站是否经代理（决定要不要按本机 DNS 结果定罪，沿用 MIN-2219 的
+    # 既有豁免）。客户端缓存键、复用作用域（单次选源）、keepalive 形态一律未动，见模块头与
+    # AGENTS「HTTP 客户端复用与连接管理」。
     return httpx.AsyncClient(
         proxy=proxy_addr,
         timeout=timeout,
         verify=verify,
         http2=http2,
         limits=_httpx_limits,
+        event_hooks={"response": [_build_hop_guard(proxy_addr)]},
     )
 
 
@@ -449,6 +457,22 @@ async def async_req(
         # 改成抛异常会击穿 50+ 平台函数的兜底装饰器语义。
         _log_dependency_missing(e, url)
         return _failure_result(redirect_url, return_cookies, include_cookies)
+    except _RedirectHopRejected as e:
+        # M-1：某一跳（含 3xx 落地跳）命中内网/保留目标或非白名单协议 → 该候选本轮按「没拿到数据」
+        # 处理（_failure_result 的空值契约不变，50+ 平台函数的兜底装饰器语义不受影响）。
+        # 与下方通用分支复用同一条既有模板（新增 tr 串须同步五处目录），但级别取 warning：
+        # 安全拒绝不该和「网络抖了一下」一起沉在 debug 里——MIN-2219 给初始地址定 warning 的
+        # 三条理由（必须留线索 / 不能被当成节点不通 / logs 会轮转）在这里逐字成立。
+        # 跳转后那一跳的原始 URL 在 e.hop_url 里（异常文本已脱敏），一并过 mask_credentials。
+        logger.warning(
+            i18n.tr(
+                "async_req 请求失败: {masked_url} - {type_name}: {e}",
+                masked_url=utils.mask_credentials(url),
+                type_name=type(e).__name__,
+                e=utils.mask_credentials(str(e)),
+            )
+        )
+        return _failure_result(redirect_url, return_cookies, include_cookies)
     except Exception as e:
         # 异常时按调用方期望的返回契约回退（统一走 _failure_result，见其注释）。
         # WD-01：url 与异常文本 e **两者**都必须脱敏——httpx/urllib3 的异常字符串**必然内嵌完整
@@ -503,6 +527,110 @@ def _internal_stream_target_reason(url: str, proxy_addr: OptionalStr) -> str | N
     if proxy_addr and web_config._parse_ip_literal(host) is None:
         return None
     return web_config._host_internal_reason(host)
+
+
+class _RedirectHopRejected(httpx.HTTPError):
+    # M-1（2026-09-29 审查 WP-B）：逐跳复检命中时抛出的**内部控制流异常**，唯一用途是中止 httpx
+    # 的 3xx 跟随链，绝不穿透给调用方——它总落在 async_req / get_response_status 既有的失败分支
+    # 里（前者 return _failure_result 的空值、后者 return False），与「网络异常」同一条出口，
+    # 不新增返回契约（AGENTS「平台解析函数的返回契约必须匹配兜底装饰器」）。
+    # 继承 httpx.HTTPError 而**不是** RuntimeError：async_req 的第一条 except 分支是
+    # `except (ImportError, ModuleNotFoundError, RuntimeError)`（MIN-2216 的缺包分支），
+    # 继承 RuntimeError 会被它截走、把一次安全拒绝误报成「缺少可选依赖，请执行 pip install」。
+    def __init__(self, hop_url: str, reason: str) -> None:
+        self.hop_url = hop_url
+        self.reason = reason
+        # 消息文本只进日志的 {e} 位（两侧调用方都还会再过一次 mask_credentials），属诊断数据
+        # 而非用户可见文案模板，故不走 i18n.tr()：新增 tr 串必须同步四语目录 + web/app.js 并
+        # 重编 .mo（AGENTS「i18n 文案、目录与占位符」），那些文件不在本次改动范围内。
+        super().__init__(f"重定向逐跳复检拒绝落地目标: {utils.mask_credentials(hop_url)} - {reason}")
+
+
+def _redirect_hop_rejection_reason(url: str, proxy_addr: OptionalStr) -> str | None:
+    # 逐跳复检的**唯一定义点**（M-1）：探针与 async_req 的每一跳都走这里，判定不在调用点复制。
+    # 两道检查与「请求入口」完全同口径、同一批函数，不另立规则：
+    #   ① scheme 白名单 utils.is_safe_http_url（与 async_req/get_response_status 入口同一函数）；
+    #   ② 内网/保留目标 _internal_stream_target_reason（含「有代理时不按本机 DNS 定罪」的既有豁免、
+    #      以及「IP 字面量两种情况都判」的既有收口）。
+    # ① 放在钩子里的理由：钩子拿到的是 httpx 已解析成绝对的跳转地址，形状与入口完全相同，
+    # 只判内网会让「入口判协议、钩子不判协议」两处迟早分叉。
+    if not utils.is_safe_http_url(url):
+        return "非白名单协议"
+    return _internal_stream_target_reason(url, proxy_addr)
+
+
+def _build_hop_guard(proxy_addr: OptionalStr) -> Callable[[httpx.Response], Awaitable[None]]:
+    # 构造挂到 AsyncClient 上的 response 事件钩子（M-1 的接线点，见 _build_client）。
+    # 为什么必须写成 async def：httpx 0.28.1 的 AsyncClient._send_handling_redirects 里是
+    # `await hook(response)`（同步 Client 才是裸 hook(response)），同步钩子返回 None 会当场
+    # TypeError——别顺手把它改回普通函数。
+    # 触发时机与作用域（每跳一次，含最终落地跳）：
+    #   ① 命中即抛 → httpx 在该跳的 except BaseException 里 `await response.aclose()` 后原样上抛，
+    #      于是**不再发下一跳**、跟随链就地终止；
+    #   ② 该跳的 status_code / content-type / 响应体一律不回流入探针结论或 debug 日志——
+    #      MIN-2219 关掉的是「初始 URL 就是内网」，本钩子关掉的是它的跳转版形态
+    #      「公网 URL 过了校验 → 302 到 http://127.0.0.1:6379/ 或 http://169.254.169.254/」。
+    # 残余风险（登记，不假装已闭合）：
+    #   · response 钩子在**该跳响应头已收到之后**触发，所以「跳转后的那一跳」出站连接已经发生；
+    #     本层保证的是结论/日志/响应体不外流且不再继续跟随。要在建连之前拦断只能改用 request
+    #     钩子，代价是每跳两次判定（含两次 getaddrinfo），未取，交回维护者决定。
+    #   · DNS 重绑定窗口（判定用的解析与实际建连的解析不是同一次）无法在本层消除，理由见
+    #     web_config._host_internal_reason 的同名说明。这里**故意不给判定结果加缓存**：缓存会
+    #     把「一次解析」供给后续所有跳与所有请求，等于把这个窗口主动拉长。
+    #   · 本钩子只覆盖**经本模块**出站的链路。src/stream_select.py 的同步探针自建两支 httpx.Client
+    #     （同样 follow_redirects=True）、不经 _build_client，由 build_sync_hop_guard 挂上**同一判定**
+    #     的同步形态，接线点收敛在 src/stream_select.py 的 _probe_client。
+    #     [历史注 2026-09-30 WP-J] 本条原文写「同一条 3xx 落地复核在该侧仍未接线、属另一个文件的
+    #     改动范围」，该陈述已被证伪并改正；但「探针已经全栈收口」仍然不成立——DNS 重绑定窗口、
+    #     跳转那一跳已发生的连接、以及 stream_select 内 _is_derived_hop_allowed 那份只认字面量的
+    #     派生地址闸门（MID-2231，不做 DNS）都不在本层。
+    async def _guard(response: httpx.Response) -> None:
+        hop_url = str(response.url)
+        reason = _redirect_hop_rejection_reason(hop_url, proxy_addr)
+        if reason is None:
+            return
+        raise _RedirectHopRejected(hop_url, reason)
+
+    return _guard
+
+
+# WP-J（2026-09-30，方案 1-A）：以下三个公开别名 + 一个同步钩子工厂，供 src/stream_select.py 的同步
+# 探针复用**同一份**判定与**同一个**内部控制流异常。判定绝不允许在调用点复制第二套 urlparse/内网名单
+# （AGENTS「判定只有一份事实源」/async_http 上方 MIN-2219 注释「两处口径不一致本身就是缺口」）。
+# 私有名一律保留：本模块既有用法不改，tests/test_regression_2026_09_22_net.py::
+# test_reuse_of_the_shared_criterion_is_static 还按 `_internal_stream_target_reason` 字面量切分本文件
+# 源码做「判据来自 web_config、本模块不另立网段常量」的机检。别名与本体是同一对象、不构成第二份口径
+# （同仓既有手法：src/stream_select.py 的 mark_ffmpeg_reject = _mark_probe_reject）。
+RedirectHopRejected = _RedirectHopRejected
+internal_stream_target_reason = _internal_stream_target_reason
+redirect_hop_rejection_reason = _redirect_hop_rejection_reason
+
+
+def build_sync_hop_guard(proxy_addr: OptionalStr) -> Callable[[httpx.Response], None]:
+    # 同步 Client 的 response 事件钩子工厂（WP-J）：判定、命中时抛出的异常、触发时机与作用域与
+    # _build_hop_guard **逐字相同**（每跳一次、含最终落地跳；命中即停止跟随；该跳的 status_code /
+    # content-type / 响应体一律不回流入探针结论或日志）。改动本函数前请先读 _build_hop_guard 那一段
+    # 的「残余风险登记」——跳转那一跳的连接已经发生、DNS 重绑定窗口本层不闭合、刻意不给判定加缓存。
+    # 为什么必须是**两个工厂**而不是一个：httpx 0.28.1 里 AsyncClient._send_handling_redirects 是
+    # `await hook(response)`（_client.py:1696），同名方法在同步 Client 里是裸 `hook(response)`
+    # （_client.py:981），两种调用形态互斥：
+    #   ① 唯一的那个函数写成 async def 交给同步 Client → 钩子返回的协程**从未被 await**，判定静默
+    #      失效（比报错更糟），GC 时还甩出 "coroutine ... was never awaited" RuntimeWarning——
+    #      AGENTS「pytest 0 警告口径」要求修根因而非 filterwarnings 掩盖；
+    #   ② 写成普通函数交给 AsyncClient → `await None` 当场 TypeError。
+    # 于是两侧各需一种调用形态，共用的是判定函数（redirect_hop_rejection_reason）与异常
+    # （RedirectHopRejected），两个工厂各自只薄封装一层「取 response.url → 调判定 → 命中即抛」。
+    # 命中抛 _RedirectHopRejected（继承 httpx.HTTPError，理由见该类注释）：同步探针一侧由
+    # src/stream_select.py 的 _validate_stream_url 显式 except 收敛成「本候选校验失败」，
+    # 绝不穿透给调用方、不改变其 bool 返回契约。
+    def _guard(response: httpx.Response) -> None:
+        hop_url = str(response.url)
+        reason = redirect_hop_rejection_reason(hop_url, proxy_addr)
+        if reason is None:
+            return
+        raise RedirectHopRejected(hop_url, reason)
+
+    return _guard
 
 
 async def get_response_status(
@@ -587,6 +715,22 @@ async def get_response_status(
                 url=utils.mask_credentials(url),
                 status_code=response.status_code,
                 content_type=response.headers.get("content-type", ""),
+            )
+        )
+        return False
+    except _RedirectHopRejected as e:
+        # M-1：3xx 落地跳命中内网/保留目标（或非白名单协议）。判定性质与「初始地址即内网」完全
+        # 相同——MIN-2219 那三条定级理由（安全判定必须 warning / 不能被降级成相邻画质 / URL 必须
+        # 脱敏）逐字适用，故复用同一条既有 warning 模板而不新增 tr 串（新增须同步五处目录）。
+        # 返回口径不变：仍是「不可达」的同一个 False，src/stream.py 的两处探针调用点
+        # （抖音 m3u8 画质回退、TikTok 候选校验）无需新增分支（别在这里改成抛穿，
+        # 那会击穿调用方的兜底装饰器语义）。
+        # 残余风险见 _build_hop_guard 的注释：跳转那一跳的连接已经发生；DNS 重绑定窗口本层不闭合。
+        logger.warning(
+            i18n.tr(
+                "get_response_status 拒绝内网/保留目标（疑似被篡改的流地址）: {masked_url} - {reason}",
+                masked_url=utils.mask_credentials(e.hop_url),
+                reason=f"重定向逐跳复检命中: {e.reason}（初始地址 {utils.mask_credentials(url)}）",
             )
         )
         return False

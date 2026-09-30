@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# src/web_api.py 测试：Web 面板 FastAPI 应用的安全与健壮性回归。聚焦七类契约 ——
+# src/web_api.py 测试：Web 面板 Starlette 应用的安全与健壮性回归。聚焦七类契约 ——
 # ① 鉴权中间件（启用认证时所有 /api/* 须 401，禁用时开放）；② 登录限流（防 XFF 伪造绕过、
 # 失败计数与成功重置、密码变更吊销 token）；③ 写接口的注入/越权防护（quality 含换行被 422、
 # 危险配置键被 403 阻断 RCE）；④ 并发安全（TOCTOU 重复添加房间）与副作用（停止录制触发日志归档、
@@ -8,7 +8,7 @@
 # ⑦ 事件循环不被阻塞调用拖住、对外不回显内部异常（MID-34/39）。
 # 测试策略：用 types.ModuleType 注入轻量 fake main（避免导入真实 main.py 触发的 FFmpeg/Node 检查
 # 等重副作用，web_api 仅在请求处理时才 import main、仅用到 file_update_lock 等符号）；通过
-# create_app 注入临时 config/URL_config/downloads/logs 目录隔离文件系统；用 FastAPI TestClient
+# create_app 注入临时 config/URL_config/downloads/logs 目录隔离文件系统；用 Starlette TestClient
 # 同步驱动异步路由，全程不监听端口。用例内 C4/C8/C10/C11 等为安全/健壮性回归编号（见 CODE_WIKI 变更记录）。
 #
 # 两条与被测代码同步演进的环境约束：
@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from fastapi.testclient import TestClient
 from httpx import Response
+from starlette.testclient import TestClient
 
 # 面板对外声称的访问地址（同时决定 Host 允许名单），与 _write_web_section 里的 web_host 一致
 _BASE_URL = "http://127.0.0.1:8000"
@@ -253,8 +253,9 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
-        # version 与 FastAPI 应用元数据同源，避免面板与探活报告各写一份版本号
-        assert body["version"] == app_env.app.version
+        # version 与 /health 的数据来源同源（Starlette 无 FastAPI 的 app.version 元数据，
+        # 阶段2 后以 web_api._APP_VERSION 为同一事实），避免面板与探活报告各写一份版本号
+        assert body["version"] == app_env.wa._APP_VERSION
 
     def test_health_ignores_engine_state(self, app_env: types.SimpleNamespace, fake_main: types.ModuleType) -> None:
         # 探活不得掺入录制引擎健康度：把引擎状态接口打成抛异常（/api/status 会自行

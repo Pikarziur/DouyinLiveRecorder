@@ -6,6 +6,8 @@
 # 新实现：tr("[{record_name}] xxx", record_name=record_name)
 #         模板先查表（带占位符的模板原样查），命中后再 .format(**kwargs)。
 
+from types import SimpleNamespace
+
 import i18n
 
 
@@ -64,3 +66,66 @@ def test_tr_does_not_match_substituted_form() -> None:
         assert out_runtime == "[房间A] template"
     finally:
         i18n._tr = saved
+
+
+# ---------------------------------------------------------------------------
+# M-19（2026-09-29）：tr() 的「永不抛」承诺此前只覆盖 KeyError/IndexError/ValueError，
+# 漏了**值侧**两类失败——占位符语法完全合法，但实参为 None 时 str.format 抛
+# AttributeError（{x.y}）或 TypeError（{x:d}）。Python 3.14.7 实测两者直接穿透 tr()。
+# 危害与 MI-23 同一条：tr 的调用点大量位于 except 分支内，二次异常顶掉原始异常，
+# 「网络失败」升级成崩溃且真实故障被掩盖。以下用例即该缺口的回归锁。
+# 注：conftest 的 _pin_identity_translation 把 _tr 钉成恒等映射，所以「恒等 + 原文
+# 也格式化失败 → 返回裸模板」是本组用例的默认路径；需要「译文命中」时按本文件既有
+# 惯例临时替换 i18n._tr（走 i18n 自己的引用点，不改翻译机制本身）。
+# ---------------------------------------------------------------------------
+
+
+def test_tr_attribute_error_placeholder_degrades_to_template() -> None:
+    # {x.y} 在 x=None 时 .format 抛 AttributeError('NoneType' object has no attribute 'y')：
+    # 译文（恒等）与原文两级格式化都会抛，必须落到「返回裸模板」这一层而不是向外抛。
+    assert i18n.tr("value {x.y}", x=None) == "value {x.y}"
+
+
+def test_tr_type_error_format_spec_degrades_to_template() -> None:
+    # {x:d} 在 x=None 时 .format 抛 TypeError(unsupported format string passed to
+    # NoneType.__format__)：同上，恒等映射下两级都失败 → 裸模板。
+    assert i18n.tr("count {x:d}", x=None) == "count {x:d}"
+
+
+def test_tr_attribute_error_falls_back_to_original_template() -> None:
+    # 降级顺序必须保持「先试原文模板」：译文里多出取属性占位符 {a.b}（译者手滑），
+    # 原文模板并无该占位符 → 译文格式化抛 AttributeError，原文仍可用 name 正常插值。
+    saved = i18n._tr
+    try:
+        i18n._tr = lambda template: "详情 {a.b} {name}" if template == "detail {name}" else template
+        assert i18n.tr("detail {name}", a=None, name="A") == "detail A"
+    finally:
+        i18n._tr = saved
+
+
+def test_tr_type_error_falls_back_to_original_template() -> None:
+    # 同上一条，只是失败类型换成 TypeError（译文用 {age:d}、调用方传 None）。
+    # 这两条一起锁住「AttributeError/TypeError 走的是与 KeyError 完全相同的两级降级」，
+    # 而不是被新增的 except 分支直接吞成裸模板。
+    saved = i18n._tr
+    try:
+        i18n._tr = lambda template: "年龄 {age:d}" if template == "age {age}" else template
+        assert i18n.tr("age {age}", age=None) == "age None"
+    finally:
+        i18n._tr = saved
+
+
+def test_tr_valid_attribute_and_format_spec_still_interpolate() -> None:
+    # 反向锁：扩异常元组不得把**合法**的属性占位符/格式符一并吞掉。
+    # 传真对象时 {x.y} 照常取值、传 int 时 {x:d} 照常格式化——降级只在异常时发生。
+    obj = SimpleNamespace(y=7)
+    assert i18n.tr("row {x.y}", x=obj) == "row 7"
+    assert i18n.tr("n {x:d}", x=5) == "n 5"
+
+
+def test_tr_missing_key_degradation_path_unchanged() -> None:
+    # 既有降级路径复核（M-19 只加异常类型、不改语义）：缺 kwarg 仍是 KeyError 支路，
+    # 返回未插值的原文模板，且与新增的两种异常给出同一形态的输出。
+    assert i18n.tr("hello {name}", name="A") == "hello A"
+    assert i18n.tr("hello {name}") == "hello {name}"
+    assert i18n.tr("hello {name}", name=None) == "hello None"

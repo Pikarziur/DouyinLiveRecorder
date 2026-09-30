@@ -158,7 +158,7 @@ DouyinLiveRecorder/
 │   ├── http_config.py          # HTTP 客户端共享配置（SSL 验证开关）
 │   ├── async_http.py          # 异步 HTTP 客户端 (httpx)
 │   ├── sync_http.py           # 同步 HTTP 客户端
-│   ├── web_api.py             # Web 管理面板 FastAPI 应用
+│   ├── web_api.py             # Web 管理面板 Starlette 应用
 │   ├── web_config.py          # Web 面板配置读写
 │   ├── web_tray.py            # Web 模式系统托盘（最小化到托盘）
 │   ├── base.py               # 弹幕采集基类（DanmakuBase / DanmakuMessage）
@@ -437,6 +437,14 @@ web_allowed_hosts =
 ```
 
 > `web_host` 在仓库默认配置中为 `127.0.0.1`（仅本机可访问）。Docker 或需局域网/公网访问时改为 `0.0.0.0`，并务必同时开启 `web_auth_enable` 与 `web_password`。
+
+### GUI 界面配置 (config/config.ini)
+
+```ini
+[GUI]
+# 界面主题：light | dark | high_contrast（留空跟随系统外观明暗；GUI 侧边栏「界面主题」菜单选择后自动写回）
+gui_theme =
+```
 
 ### 直播间配置 (config/URL_config.ini)
 

@@ -338,6 +338,37 @@ def _is_recordable_url(url: str) -> bool:
 # 单次探针的超时秒数（HEAD / Range-GET / GET 复核共用）
 _PROBE_TIMEOUT_SECONDS = 5
 
+
+# 探针同步客户端的唯一构造点（WP-J，2026-09-30，方案 1-A）：本模块原有两处各自裸写
+# httpx.Client(...)（_validate_stream_url 的 owns_client 自建分支、select_source_url 的整轮共用客户端），
+# 两处都 follow_redirects=True 却都没挂逐跳复检——被劫持/被 MITM 的平台接口只要回传一个「公网 URL →
+# 302 → http://127.0.0.1:6379/ 或 http://169.254.169.254/」，同步探针就会照着跟进去连内网，并把该跳的
+# status_code / content-type 回显进轮转日志（= 稳定的内网端口观测口，MIN-2219 的跳转形态）。
+# 现两处一律经本工厂，异步钩子随之挂上；「新增第三处裸构造就静默漏掉防线」由
+# tests/test_sync_probe_internal_guard.py 的 AST 结构锁挡住（构造点唯一 + 工厂调用点计数 +
+# event_hooks 实参必须来自 build_sync_hop_guard）。
+# proxy_addr 必须由**调用方**在传入之前经 utils.handle_proxy_addr 归一：SEV-N05 的「归一只放在构造客户
+# 端之前这一处」原意即「各探针调用点不各自归一」，本工厂既不做二次归一、也绝不允许把归一挪到构造之后
+# （两处调用点各自的位置保持原样，见其上方注释）。
+# 复用形态一律未动：作用域仍是单次选源、finally 关闭、keepalive 保持默认、不按 (proxy, verify) 做模块级
+# 全局缓存（AGENTS「HTTP 客户端复用与连接管理」——虎牙 CDN 按连接预算限流，常驻 keepalive 会与 ffmpeg
+# 拉流争抢）。本函数只加 event_hooks。
+def _probe_client(timeout: int, proxy_addr: str | None, verify: bool) -> httpx.Client:
+    # 钩子工厂与判定都来自 src.async_http，本模块不另写一份（口径分叉本身就是缺口）。
+    # 这里**函数内 import** 而非模块级：沿 async_http.py:518-521 记录的同一手法——本模块有模块级
+    # `import main`、main.py 又 `from src.stream_select import ...`，这条环已让 async_http 把
+    # web_config 的 import 放进函数内；给本模块加一条模块级出边会改变各模块的初始化顺序（同一手法、
+    # 同一理由）。本函数每轮选源只走 1~2 次，多一次已缓存的 sys.modules 查找没有成本。
+    from src.async_http import build_sync_hop_guard
+
+    return httpx.Client(
+        timeout=timeout,
+        proxy=proxy_addr,
+        verify=verify,
+        event_hooks={"response": [build_sync_hop_guard(proxy_addr)]},
+    )
+
+
 # ── 正文派生的第二跳请求（变体列表 / 媒体分片）的边界（MID-2231，2026-09-22）──
 # urljoin 对**绝对** URL 会整体丢弃 base，于是播放列表正文里的一行就能把下一跳指到任意 host；
 # 而 headers 里带着 get_record_headers(platform, url, cookies=…) 注入的用户 Cookie。httpx 只在
@@ -466,6 +497,9 @@ def _probe_hls_segment(
 ) -> bool:
     media_url = playlist_url
     media_lines: list[str] = []
+    # 函数内 import 的理由见 _probe_client
+    from src.async_http import RedirectHopRejected
+
     try:
         resp = client.get(playlist_url, headers=dict(headers), follow_redirects=True)
         if resp.status_code != 200:
@@ -518,6 +552,11 @@ def _probe_hls_segment(
             )
             return True
         seg_headers = _headers_for_derived_hop(playlist_url, seg_url, headers)
+    except RedirectHopRejected:
+        # WP-J：本函数每一条「保守维持列表可达」的兜底都不得吞掉内部控制流异常——在内网落地目标面前，
+        # 维持可达就等于把内网地址交给 ffmpeg（调用方末位候选还会 return True 放行）。原样上抛，
+        # 由 _validate_stream_url 的 RedirectHopRejected 分支统一收敛成「本候选校验失败」。
+        raise
     except Exception as e:
         logger.debug(
             i18n.tr(
@@ -535,6 +574,13 @@ def _probe_hls_segment(
         _throttle_probe(seg_url)
         try:
             seg_resp = client.get(seg_url, headers={**seg_headers, "Range": "bytes=0-0"}, follow_redirects=True)
+        except RedirectHopRejected:
+            # WP-J：同上——分片探测的「按列表可达处理」兜底也不得吞掉内部控制流异常
+            # （函数级说明见本文件上方 _probe_hls_segment 第一条 except RedirectHopRejected）。
+            # 这里绝不能改成 pass：seg_url 分支被跳过后下一句就引用未赋值的 seg_resp，
+            # UnboundLocalError 会被外层 except Exception 当成「探测异常」吞掉，
+            # 末位候选于是 return True 把内网地址交给 ffmpeg。
+            raise
         except Exception as e:
             logger.debug(
                 i18n.tr(
@@ -594,6 +640,9 @@ def _confirm_get_ok(
     platform: str | None = None,
 ) -> bool:
     reject_status: int | None = None
+    # 函数内 import 的理由见 _probe_client
+    from src.async_http import RedirectHopRejected
+
     for attempt in range(2):
         try:
             # headers 由调用方逐请求显式传入：探针客户端在多个候选间复用，不能再把
@@ -612,6 +661,11 @@ def _confirm_get_ok(
                 reject_status = probe.status_code
                 # 偶发 403 即使重试恢复也是限流证据：记录退避，下一轮让 ffmpeg 直连
                 _mark_probe_reject(url, platform)
+        except RedirectHopRejected:
+            # WP-J：本函数的 except 分支语义是「异常（超时等）**不推翻** HEAD 结论」，末位候选还直接
+            # return True——内部控制流异常一旦走进那条分支，就等于「公网 HEAD 通过 → 302 落在内网 →
+            # 探针判可用」，正是 MIN-2219 的跳转形态。原样上抛，交 _validate_stream_url 收敛为校验失败。
+            raise
         except Exception as e:
             # 异常（超时等）不推翻 HEAD 结论，但必须留痕（禁止静默吞异常）；
             # attempt 0 的异常可能是偶发超时，按「重试一次再定罪」语义隔开后重试，
@@ -667,6 +721,13 @@ def _confirm_get_ok(
 #    直接 403、发 httpx 默认 UA 被斗鱼 hwa 在 GET 时偶发 403；
 # 5) client 由 select_source_url 传入时整轮候选共用（keepalive 生效，verify/timeout/proxy 以该 client
 #    为准、本函数不再覆盖），不传时自建自管、与旧行为一致。
+# 6) WP-J（2026-09-30，方案 1-A）：本函数是「即将对某个候选地址发探针」的唯一入口，故两道内网防线都落
+#    在这里——① 发第一个请求之前对**初始 URL** 调一次内网/保留目标判定（口径 6 之前该侧连这一层都没有，
+#    只有 _is_recordable_url 的协议形态白名单，它挡 file:///concat:，不挡 http://127.0.0.1:6379）；
+#    ② 自建/复用两支客户端一律带逐跳重定向复检钩子（见 _probe_client）。判定复用 src/async_http 的同一份
+#    实现，本模块不另写 urlparse/内网名单。命中一律回 False（本候选校验失败）且**不享受末位放行**：
+#    last_resort 的语义边界是「网络 / CDN 拒绝」（MID-19），内网目标不是「CDN 拒绝」，放行等于把 ffmpeg
+#    指向内网。返回契约仍是 bool，异常绝不穿透给调用方。
 def _validate_stream_url(
     url: str,
     proxy_addr: str | None = None,
@@ -677,9 +738,36 @@ def _validate_stream_url(
     last_resort: bool = False,
     client: httpx.Client | None = None,
 ) -> bool:
+    # 函数内 import 的理由见 _probe_client（沿 async_http.py:518-521 的同一手法，模块级出边会改变
+    # 本模块与 main 的初始化顺序）。RedirectHopRejected 必须是 except 可见的名字，故也在此取。
+    from src.async_http import RedirectHopRejected, internal_stream_target_reason
+
+    # WP-J：初始 URL 的内网/保留目标判定。位置三条都不能挪——
+    #   ① 必须早于 _probe_in_backoff：那条分支在「退避中 + 末位候选」时无条件 return True 放行给 ffmpeg，
+    #      内网地址一旦走到那儿就被请进 -i；
+    #   ② 必须早于客户端构造与任何探针：命中即一个字节都不发（本判定是**安全判定**，不是可达性判定）；
+    #   ③ 与 _is_recordable_url 的形态白名单互不替代（协议形态与内网目标管的是两回事，两道都要在）。
+    # 用 internal_stream_target_reason 而**不是** redirect_hop_rejection_reason：后者带 scheme 白名单
+    # （utils.is_safe_http_url 只认 http/https），而本模块的候选允许 rtmp/rtmps（MID-19 /
+    # _ALLOWED_STREAM_SCHEMES，斗鱼 rtmp 拼接与部分海外平台仍在下发），协议维度已由 _is_recordable_url
+    # 把关，这里只补内网维度；逐跳钩子仍用 redirect_hop_rejection_reason（与异步侧完全同口径）。
+    # proxy_addr 此处仍是调用方传入的原文（自建分支要到下方才归一，见 SEV-N05 的「归一只放在构造客户端
+    # 之前这一处」）：_internal_stream_target_reason 只用它判断「本次是否经代理出站」，而归一前后的
+    # 真值性完全一致（有代理→非空串；无代理→"" 或 None→假），故不构成口径分叉。
+    internal_reason = internal_stream_target_reason(url, proxy_addr)
+    if internal_reason is not None:
+        logger.warning(
+            i18n.tr(
+                "探针拒绝内网/保留目标（疑似被篡改的流地址）: {masked_url} - {reason}",
+                masked_url=utils.mask_credentials(url),
+                reason=internal_reason,
+            )
+        )
+        return False
     # verify 仍按原规则解析（供自建 client 时使用）；传入 client 时其值被忽略
     if verify is None:
         verify = _http_config.get_effective_ssl_verify(platform)
+
     headers: dict[str, str] = {}
     if platform:
         # 探针与 ffmpeg 录制共用这两个函数取头与 UA，两端一字不差（依据见上方口径 4）
@@ -720,8 +808,10 @@ def _validate_stream_url(
             # 同一配置值得到同一代理结论（AGENTS「同步/异步校验器 proxy/verify/UA 三者一致」）。
             # 构造失败无需另加保护：本函数已有的 except Exception 会收敛为「本候选校验异常」，
             # 末位候选仍按既有口径放行给 ffmpeg，owns_client 语义不变。
+            # WP-J：构造改走 _probe_client 单点工厂（逐跳复检钩子随客户端挂上）；归一位置未动、
+            # owns_client 与「自建自管 + finally 关闭」语义未动。
             proxy_addr = utils.handle_proxy_addr(proxy_addr)
-            probe_client = httpx.Client(timeout=timeout, proxy=proxy_addr, verify=verify)
+            probe_client = _probe_client(timeout, proxy_addr, verify)
         response = probe_client.head(url, headers=headers, follow_redirects=True)
         content_type = response.headers.get("content-type", "").lower()
         if response.status_code in (401, 403):
@@ -860,6 +950,23 @@ def _validate_stream_url(
                 url=utils.mask_credentials(url),
                 status_code=response.status_code,
                 content_type=content_type,
+            )
+        )
+        return False
+    except RedirectHopRejected as e:
+        # WP-J：3xx 落地跳命中内网/保留目标（或非白名单协议）。与 async_http.get_response_status 的
+        # 同名分支同一口径——MIN-2219 那三条定级理由逐字适用（安全判定必须 warning、不能被降级成
+        # 「相邻画质不通」、URL 必须脱敏），故复用同一条已登记模板而不新增第二套措辞。
+        # **必须排在 except Exception 之前**：落到那条分支去就意味着末位候选被 return True 放行，
+        # 而末位放行的语义边界是「网络 / CDN 拒绝」（MID-19），内网目标从来不属于这一类。
+        # 返回契约不变：仍是「本候选校验失败」的同一个 False，由 select_source_url 按既有口径
+        # 回退下一候选；本函数绝不把内部控制流异常穿透给调用方。
+        # 残余风险同 _build_hop_guard：跳转那一跳的连接已经发生；DNS 重绑定窗口本层不闭合。
+        logger.warning(
+            i18n.tr(
+                "探针拒绝内网/保留目标（疑似被篡改的流地址）: {masked_url} - {reason}",
+                masked_url=utils.mask_credentials(e.hop_url),
+                reason=f"重定向逐跳复检命中: {e.reason}（初始地址 {utils.mask_credentials(url)}）",
             )
         )
         return False
@@ -1075,10 +1182,11 @@ def select_source_url(
     # 模板须同步四语目录 + .mo，不属本文件的改动权限。
     probe_client: httpx.Client | None
     try:
-        probe_client = httpx.Client(
-            timeout=_PROBE_TIMEOUT_SECONDS,
-            proxy=proxy_addr,
-            verify=_http_config.get_effective_ssl_verify(platform),
+        # WP-J：构造改走 _probe_client 单点工厂（逐跳复检钩子随客户端挂上，本轮全部候选与
+        # _confirm_get_ok / _probe_hls_segment 那四处 follow_redirects=True 一并被覆盖）；
+        # 归一仍在上方那一处、复用作用域仍是单次选源、finally 关闭，形态一律未动。
+        probe_client = _probe_client(
+            _PROBE_TIMEOUT_SECONDS, proxy_addr, _http_config.get_effective_ssl_verify(platform)
         )
     except ValueError, TypeError:
         probe_client = None
@@ -1103,6 +1211,27 @@ def select_source_url(
                     i18n.tr(
                         "流地址形态不合规，已丢弃（不交给 ffmpeg -i）: {url}",
                         url=utils.mask_credentials(url),
+                    )
+                )
+                return None
+            # WP-J（2026-09-30）：交付 ffmpeg -i 前的最后一道内网闸门，与上面的形态闸门并列、互不替代
+            # （形态白名单管协议与字符合法性，管不住 http://127.0.0.1:6379）。
+            # 为什么探针层那道判定（_validate_stream_url 入口）不够：record_url 与本轮已探候选同址时走的是
+            # 「复用结论并交由 ffmpeg 拉流」分支（本函数所在作用域下方 `record_url_str in probed`），那条
+            # 分支**一个探针都不发**、也就一次都不经过探针入口的判定，于是「探针已判失败的内网地址」会被
+            # 原样递给 -i。判定仍复用 async_http 那一份，本模块不另写规则。
+            # 成本：只在选中地址时走一次（每轮至多多一次 getaddrinfo，与 MIN-2219 记入的探针成本同量级）；
+            # 刻意不给判定结果加缓存——缓存会把一次解析供给所有跳与所有请求，等于主动拉长 DNS 重绑定窗口
+            # （理由逐字见 async_http._build_hop_guard 的残余风险登记）。
+            from src.async_http import internal_stream_target_reason  # 函数内 import，理由见 _probe_client
+
+            landing_reason = internal_stream_target_reason(url, proxy_addr)
+            if landing_reason is not None:
+                logger.warning(
+                    i18n.tr(
+                        "探针拒绝内网/保留目标（疑似被篡改的流地址）: {masked_url} - {reason}",
+                        masked_url=utils.mask_credentials(url),
+                        reason=f"交给 ffmpeg -i 前的落地复核命中（{kind} 通道）: {landing_reason}",
                     )
                 )
                 return None

@@ -53,9 +53,11 @@
 │   ├── proxy.py         # 代理支持
 │   ├── ttwid.py         # 抖音 ttwid 获取
 │   ├── ab_sign.py       # AB 签名
-│   ├── web_api.py       # FastAPI Web API
+│   ├── web_api.py       # Starlette Web API
+│   ├── web_models.py    # Web 请求体校验层（dataclass + parse）
 │   ├── web_config.py    # Web 配置
 │   ├── web_tray.py      # Web 托盘
+│   ├── ui_theme.py      # GUI 主题层（token/多主题/ttk 注册/持久化/对比度机检）
 │   ├── log_archive.py   # 运行日志归档（停止录制流程收尾：四日志按时间戳改名）
 │   ├── weverse_auth.py  # Weverse 认证
 │   ├── ffmpeg_install.py # FFmpeg 自动安装

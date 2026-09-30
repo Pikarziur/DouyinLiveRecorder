@@ -9,6 +9,9 @@
     <link rel="stylesheet" href="/web/style.css">
 </head>
 <body data-theme="light">
+    <!-- 轻量粒子背景层：web/motion.js 优先复用此节点（缺失时自建）。固定铺满视口、落在内容之下、
+         pointer-events:none，aria-hidden 排除无障碍树；prefers-reduced-motion 命中时 motion.js 不绘制。 -->
+    <canvas id="bg-canvas" aria-hidden="true"></canvas>
     <!-- 顶栏：品牌 + 标签页导航(.tab[data-view]) + 语言选择/主题切换/退出。
          这些控件在 app.js 的 DOMContentLoaded 中统一绑定；data-view 决定 showView 切换到哪个面板。 -->
     <header class="topbar">
@@ -170,6 +173,29 @@
     <!-- 全局轻提示：toast() 写 #toast 文本并按类型加 success/error/info 类，2.5s 后隐藏；
          单例 toastTimer 保证连续提示互不打架（新提示清除旧定时器）。 -->
     <div id="toast" class="toast hidden"></div>
+    <!-- 认证复验口令窗（M-22，2026-09-29）：修改 [Web] web_auth_enable / web_password 时由
+         app.js::askReauthPassword() 摘掉 .hidden 弹出，替代原 window.prompt（明文回显、
+         是面板唯一非 type="password" 的口令采集形态）。四个出口（确认/取消/Enter/Esc/点遮罩）
+         一律经 _settleReauth() 收敛：立刻清空 #reauth-password 并重新挂上 .hidden，
+         口令不在隐藏节点里过夜。
+         与后端契约同源（src/web_api.py::update_config 的 MID-2241 段）：认证当前开启时写这两个键
+         必须带能过 verify_web_password 的 reauth_password，否则 403；因此留空/取消在前端就地放弃
+         （计入「已跳过 N 项认证相关改动」），不把空 reauth 发出去撞 403。
+         反向半边：认证当前**关闭**时后端不要求复验，app.js 也就不弹本窗——否则第一次启用认证的
+         人没有旧口令可填，会被这个窗口死锁在面板之外。
+         autocomplete="off" + type="password"：口令不进浏览器自动填充候选。 -->
+    <div id="reauth-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="reauth-modal-label">
+        <div class="modal-card">
+            <label id="reauth-modal-label" for="reauth-password" data-i18n="config.authChangeReauth">请复验当前 Web 口令（修改认证配置需要；留空或取消即放弃本次改动）:</label>
+            <input type="password" id="reauth-password" autocomplete="off" data-i18n-placeholder="login.password" placeholder="访问密码">
+            <div class="modal-actions">
+                <button type="button" id="reauth-cancel" data-i18n="common.cancel">取消</button>
+                <button type="button" id="reauth-confirm" class="primary" data-i18n="config.save">保存配置</button>
+            </div>
+        </div>
+    </div>
     <script src="/web/app.js"></script>
+    <!-- 动效层：零依赖、自启动（DOM 就绪即 init），不依赖 app.js、不改其渲染结构，降低回归风险。 -->
+    <script src="/web/motion.js"></script>
 </body>
 </html>
