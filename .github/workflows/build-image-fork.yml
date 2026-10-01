@@ -1,0 +1,33 @@
+name: Build fork multi-arch image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'image tag'
+        required: false
+        default: 'latest'
+permissions:
+  packages: write      # 推 ghcr.io 必需
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/pikarziur/douyinliverecorder:${{ github.event.inputs.tag_name || 'latest' }}
+            ghcr.io/pikarziur/douyinliverecorder:latest
