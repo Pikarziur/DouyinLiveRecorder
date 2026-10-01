@@ -223,3 +223,12 @@ Qoder CN 发行版的实际数据根（`.qoder-cn`）不一致，属外部工具
 - **`scripts/douyin_live_recorder_standalone.py` 是安全修复的「回灌盲区」**：主线 2026-09-12/09-20/09-29 的协议白名单（`main.py:3466`）、同步探针内网判定、MID-49 斗鱼签名 POST、`ffmpeg_proc` 三级终止四轮修复全部未回灌该独立副本——2026-09-30 全仓审查仅有的两条严重（SSRF/file:// 探测录制链、ffmpeg 命令含 Cookie 落盘 `logs/ffmpeg.log`）都在它身上；现有 9 格孪生矩阵锁只覆盖 PATH 让位判据一项。主线安全/正确性修复落地时必须逐项核对该文件，并在提交信息写明「已回灌 / 刻意不回灌及原因」。
 - **审查报告的修复建议本身也要当假设验证，且修完必须跑全量 pytest 而非只跑触碰面**：2026-09-30 P0 批次，M-17 按报告字面建议把 `_SECRET_HEADER_RE` 的 `(?<![A-Za-z0-9"'])` guard「移到 plain 分支」，触碰面用例全绿；全量 pytest 却在看似无关的 `tests/test_notify_script_guard.py` 抓出 8 红——shell 命令串 `--header "Authorization: Bearer X"` 的键名前恰是引号，quote 排除让带引号 header 形态整体漏抹（该形态此前由 plain 分支无 quote 排除地兜住）。正确修法：驼峰分支摘掉恒死 guard 即可，plain 分支保持与查询串形态逐字同构；「guard 防 https: 误抹」的旧注释在当前键名表下已被证伪（无键名可匹配 `https:`，`_PUBLIC_UNTOUCHED` 恒绿）。复盘：① 报告条目的「修复建议」列是建议不是事实源，落地前先枚举该正则的既有消费形态（带引号 header 正是被忽略的那个）；② 回归锁要补「修的方向」与「别把既有行为修没」两个方向（本次在 `_CAMEL_LEAK_CASES` 同时加了驼峰复合键与带引号 header 两类）。
 - **CRLF 仓里做变异验证/字节级改写，锚点必须 CRLF 感知，且 Bash heredoc 不可靠**：`src/utils.py` 是纯 CRLF 文件，用 `\n` 拼的锚点两次 `not found`；即便带引号定界符，Bash 工具层也会吃掉 heredoc 里的双反斜杠转义（脚本里写两个反斜杠+n，到达 Python 时已折成一个）。可靠做法：把变异脚本经 Write 工具写成 `%TEMP%` 下的临时 .py（内容原样落盘），`chr(92)` 构造反斜杠、`"\r\n".join(lines)` 拼块，跑完删脚本并在 finally 里断言 `read_bytes()` 与原字节相等。
+
+## 2026-10-01 — GUI 单飞回归锁的 Linux CI 假红（POSIX 分支替身缺失）
+
+- **平台分流链路的测试打桩点必须覆盖全部分支，且本地可低成本复现对侧分支**：`gui._send_stop_signal_and_wait`
+  平台分流（win32 `_send_ctrl_break_to_child` / POSIX `os.kill`），替身只桩本机分支时 Linux CI 上记账恒空、
+  停止链因失去模拟耗时而瞬时完成（并发窗口连带消失），「恰一次附着」与「复用在途线程」两组判据同时落空。
+  Windows 本机复现 POSIX 路径的技巧：子进程里 **`import gui` 之后**再改 `sys.platform = "linux"`——导入前改会让
+  loguru 的 `enqueue=True` 按 posix 初始化 multiprocessing、撞 `No module named '_posixsubprocess'`（平台分支在
+  方法调用期求值，导入后再改即可生效）。 | `tests/test_gui_stop_exit_singleflight.py`

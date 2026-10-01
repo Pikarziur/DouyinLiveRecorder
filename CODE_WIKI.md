@@ -955,7 +955,7 @@ def host_of(url: str) -> str: ...
 | 包名 | 版本要求 | 用途 |
 | --- | --- | --- |
 | requests | >=2.34.2 | 同步 HTTP 请求（现仅 ffmpeg / node 安装下载脚本使用；各平台解析走 httpx 异步面） |
-| urllib3 | >=2.7.0 | 传输层（requests 之下；显式声明以防解析回退落入 CVE-2026-44431 区间） |
+| urllib3 | >=2.8.0 | 传输层（requests 之下；显式声明以防解析回退落入 CVE-2026-44431 / 97687-97689 区间） |
 | httpx[http2] | >=0.28.1 | 异步 HTTP 客户端（含 HTTP/2，`src/async_http.py` 并发抓取流地址） |
 | h2 | >=4.4.1 | httpx `http2=True` 的运行期依赖（`Client.__init__` 内 `import h2`） |
 | socksio | >=1.0.0 | httpx SOCKS 代理（socks5/socks5h）的运行期依赖（传输层内 `import socksio`） |
@@ -1623,6 +1623,20 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本直跑时额外输出 `VERIFICATION_RESULT: {"platform":..., "status":..., ...}` 结构化一行供机器解析。
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
+
+### v4.4.0-dev (2026-10-01) — 修复 test_gui_stop_exit_singleflight 的 Linux CI 4 条假红：POSIX 信号分支缺打桩点
+
+- **触发**：CI `test` job（ubuntu）4 failed / 3679 passed——`tests/test_gui_stop_exit_singleflight.py` 四个场景的「恰一次附着」断言实测 0 次（`attaches: []`），场景 A 的 `reuse_logged` 同时为 False；本地 Windows 全量绿。
+- **根因**：`gui._send_stop_signal_and_wait` 按平台分流——win32 走 `_send_ctrl_break_to_child`（原打桩点），POSIX 走 `os.kill(proc.pid, SIGINT)`。子进程脚本只桩 win32 侧，Linux 上记账替身恒不触发；连带效应：停止链失去 0.35s 模拟耗时而瞬时完成，场景 A 的 `sleep(0.05)` 后在途线程已结束、`_current_stop_worker()` 返回 None，「复用在途停止线程」判据同时落空。CI 读数（attaches 空 / wait_calls=1 / reuse_logged False）与「替身缺失」单因完全吻合，非并发缺陷。
+- **改动**（仅测试文件，无生产代码）：子进程脚本在非 win32 下按 AGENTS「stdlib 替身走被测模块命名空间 shim」口径把 `gui.os` 换 `SimpleNamespace(**vars(os))` 副本、只覆盖 `kill` 为同一记账替身（finally 还原）；`make_attach_spy` 增加 `sig=None` 形参兼容 `os.kill(pid, sig)` 调用形状；场景 D 两侧替身同步换 0.05s 短耗时版；头部注释更正「唯一外部副作用点」的已证伪表述并留带日期历史注。AGENTS「测试编写强制约定」新增「打桩点必须覆盖平台分流全部分支」条目。
+- **验证**：Windows 全量 `pytest --cov=src` 3690 passed / 14 skipped / 0 警告，`check_coverage.py` 44 模块达标；`run_gates.py` 8 门禁全绿；basedpyright 0 error / 0 warning。伪造 `sys.platform="linux"` 本地复现 POSIX 路径——四场景 25 项判据全过（技巧：`import gui` **之后**再改 `sys.platform`；导入前改会让 loguru 的 `enqueue=True` 按 posix 初始化 multiprocessing、Windows 上撞 `No module named '_posixsubprocess'`）。变异验证：拆掉单飞闸门（复用判定与 `_console_stop_lock` 拆除）后 3 条行为锁 + 1 条结构锁全部转红，`gui.py` 字节级还原。真机验证豁免（纯测试改动，不涉录制链路）。
+
+### v4.4.0-dev (2026-10-01) — deps-audit「下限复核」抓出 urllib3 2.7.0 三条新 CVE，声明下限抬至 2.8.0
+
+- **触发**：CI `deps-audit` job 的「Audit declared floors against OSV (no resolution)」步骤实测 rc=1——把每条下限钉成 `==` 逐项审计时 `urllib3==2.7.0` 报 CVE-2026-97687 / CVE-2026-97688 / CVE-2026-97689 三条公告，修复版本均为 2.8.0，旧下限自身落在受影响段（与 starlette / protobuf / h2 三次「下限复核」同型；解析模式对这类形态失明）。
+- **改动**：`requirements.txt` 与 `pyproject.toml [project.dependencies]` 的 `urllib3>=2.7.0` → `>=2.8.0`（清单仍 21 条，两侧包名集合不变），requirements 注释按 h2 先例补带日期的复核记录；`python scripts/sync_metadata.py` 重生成 `uv.lock`（锁定版本 2.7.0 → 2.8.0、specifier 同步）与 `DouyinLiveRecorder.egg-info/requires.txt`。本机 venv 实测已装 2.8.0，抬下限不改解析集合、无需重装。
+- **验证**：本地按 CI 同款逻辑复跑两步审计——解析模式与 `==` 钉定下限 `--no-deps` 模式均 `No known vulnerabilities found`（rc=0，21 条下限）；`run_gates.py` 8 条门禁全绿（内嵌全量 pytest 3690 passed / 0 警告兜底）；`pytest --cov=src` 3690 passed / 14 skipped 后 `check_coverage.py` 44 模块全部达标；basedpyright 0 error / 0 warning。无生产代码改动，真机验证不适用（豁免）。
+- **文档**：`AGENTS.md`「依赖管理·安全下限」条目与本表 `urllib3` 行同步更新。
 
 ### v4.4.0-dev (2026-10-01) — 会话改动按模块归档：AGENTS.md 信息保真精简（−1,818 B / −21 行，19 处）+ stop-hook 红线措辞硬化；本会话无生产代码改动、无文件增删
 

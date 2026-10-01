@@ -20,7 +20,10 @@ requests>=2.34.2          # 同步 HTTP 请求：现仅 ffmpeg / node 下载安�
 #   本机实测已装 2.8.0；下限只作「不得解析回退到受影响段」的保护。
 # [历史注] 2026-09-24 更正：旧表述「全部同步出站 = src/sync_http.py 约 125 调用点 → src/spider.py 各平台
 #   解析」已被推翻——spider 走 httpx 异步面（src/async_http.py），sync_http.py 现无生产 importer。
-urllib3>=2.7.0            # 传输层（requests 之下；显式声明以防重装/解析回退落入 CVE-2026-44431 区间）
+# [2026-10-01 deps-audit 下限复核] 下限由 2.7.0 → 2.8.0：CVE-2026-97687 / CVE-2026-97688 / CVE-2026-97689
+#   三条公告均影响 2.7.0、修复于 2.8.0（CI「Audit declared floors」步骤实测 rc=1）——旧下限自身
+#   落在受影响段。现装与解析集合均为 2.8.0，抬下限不改变现装、无需重装。
+urllib3>=2.8.0            # 传输层（requests 之下；显式声明以防重装/解析回退落入 CVE-2026-44431 / 97687-97689 区间）
 httpx[http2]>=0.28.1      # 异步 HTTP 客户端（含 HTTP/2，src/async_http.py 并发抓取流地址）
 # ── h2 / socksio：httpx 的**可选**能力包（extra），但本仓运行期真的会执行其代码，必须显式声明 ──
 # 为什么不靠 httpx[http2] 的 extra 传递：本清单是 Docker/CI `pip install -r` 的实际输入，而 extra

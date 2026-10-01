@@ -13,14 +13,19 @@
 #   ③ 拿锁后复核 proc.poll()，进程已退出就不再发第二遍信号。
 #
 # 判据经**子进程**驱动 gui.py 真实实现（同 test_gui_monitor.py：pytest 进程 import gui 会把
-# DLR_GUI_PARENT 注进整个会话）。桩只补「进程/控件替身」与唯一的外部副作用点
-# `_send_ctrl_break_to_child`，停止判定与排队逻辑一律走真实代码。
+# DLR_GUI_PARENT 注进整个会话）。桩只补「进程/控件替身」与信号发送的外部副作用点
+# （win32 的 `_send_ctrl_break_to_child` + POSIX 的 `os.kill`，见下方打桩点说明），
+# 停止判定与排队逻辑一律走真实代码。
 # 无头环境限制：真窗下的按钮禁用/托盘菜单不可点等交互无法实测，本文件锁的是并发语义本身。
 #
-# 为什么只把 `_send_ctrl_break_to_child` 当作打桩点：它是本链路唯一真正碰操作系统控制台的
-# 函数（FreeConsole/AttachConsole/GenerateConsoleCtrlEvent 全在里面）。把它换成记账替身后，
+# 为什么把「信号发送的外部副作用」当打桩点：`_send_stop_signal_and_wait` 按平台分流到两个
+# 真正碰操作系统的调用——win32 的 `_send_ctrl_break_to_child`（FreeConsole/AttachConsole/
+# GenerateConsoleCtrlEvent 全在里面）与 POSIX 的 `os.kill(pid, SIGINT)`。换成记账替身后，
 # 被测的「单飞闸门」——线程登记、锁、拿锁后的 proc.poll() 复核——仍然全部走真实代码，
 # 这正是 AGENTS「测试不得自实现被测逻辑」所要求的边界：桩的是外部副作用，不是判定本身。
+# [历史注 2026-10-01] 原先只桩 win32 侧且称其为「唯一外部副作用点」，Linux CI 上 ATTACHES
+# 恒为空、停止链因失去 0.35s 模拟耗时而瞬时完成，「恰一次附着」与「复用在途线程」两组判据
+# 同时落空（4 failed、本地 Windows 全绿），故补 POSIX 侧替身——打桩点必须覆盖平台分流的全部分支。
 # FakeProc 同样只提供 poll/wait/terminate 三个状态查询：wait 一调即置已退出，等价于
 # 「子进程在预算内正常收尾」这条最常见路径；超时强杀分支由 _send_stop_signal_and_wait 自身
 # 的既有语义负责，本文件不重复锁（动的是信号核心，不是 M-16 的闸门）。
@@ -54,6 +59,7 @@ _MARKER = "\n@@WP_E_STOPFLIGHT@@ "
 # 对 gui 模块级名字的替换全部包在 try/finally 里还原：泄漏出去会波及同会话其它 GUI 用例。
 _SCRIPT = r"""
 import json
+import os
 import sys
 import threading
 import time
@@ -124,7 +130,8 @@ ATTACH_SPANS = []
 
 
 def make_attach_spy(sleep_seconds=0.35):
-    def _spy(pid):
+    # sig 形参只为兼容 POSIX 分支 os.kill(pid, sig) 的调用形状（win32 分支只传 pid）。
+    def _spy(pid, sig=None):
         thread = threading.current_thread().name
         with ATTACH_LOCK:
             ATTACHES.append([thread, pid])
@@ -143,6 +150,14 @@ def _spans_overlap(spans):
 
 
 original_ctrl = gui._send_ctrl_break_to_child
+original_os = gui.os
+# POSIX 分支的信号发送点按 AGENTS「stdlib 替身走被测模块命名空间 shim」打桩：
+# os 整体换 SimpleNamespace 副本、只覆盖 kill，绝不改 stdlib 模块本体属性；
+# 不打这个桩则 Linux 上 os.kill 直扑真实系统调用，记账恒空。
+if not sys.platform.startswith("win"):
+    os_shim = types.SimpleNamespace(**vars(os))
+    os_shim.kill = make_attach_spy()
+    gui.os = os_shim
 try:
     # ─── A：两个线程并发走单飞入口 → 只允许一次控制台附着 ───────
     del ATTACHES[:]
@@ -229,6 +244,8 @@ try:
     del ATTACHES[:]
     del ATTACH_SPANS[:]
     gui._send_ctrl_break_to_child = make_attach_spy(0.05)
+    if not sys.platform.startswith("win"):
+        os_shim.kill = make_attach_spy(0.05)  # 两侧替身同步换短耗时版
     stub = base_stub()
     worker = threading.Thread(target=lambda: G._shutdown_and_quit(stub), name="quit-only")
     stub._register_stop_worker(worker)
@@ -243,6 +260,7 @@ try:
     }
 finally:
     gui._send_ctrl_break_to_child = original_ctrl
+    gui.os = original_os
 
 sys.stdout.write("\n@@WP_E_STOPFLIGHT@@ " + json.dumps(out, ensure_ascii=False))
 """
@@ -305,8 +323,8 @@ def test_concurrent_stop_and_exit_attach_console_once(results: dict[str, Any]) -
     # 用户视角是「点了退出但界面十几秒没反应」。这条把「必须说明在等什么」钉住。
     assert case["reuse_logged"] is True, "未复用正在进行的停止线程（应等待其完成后再收尾）"
     # wait_calls 是 FakeProc 的记账：停止核心（proc.wait）只能被跑一遍。
-    # 这条与 attaches 计数一起构成「二次停止」的双向证据——附着替身只覆盖 win32 分支，
-    # 万一某次改动把 Linux SIGINT 分支也接进同一入口，wait 记账仍能独立抓到重复执行。
+    # 这条与 attaches 计数一起构成「二次停止」的双向证据：附着替身与 wait 记账是两个
+    # 独立观测点，无论哪个平台分支的替身漏装或实现漂移，重复执行停止链都会在这里现形。
     assert case["wait_calls"] == 1, f"停止链被跑了两遍：{case}"
 
 

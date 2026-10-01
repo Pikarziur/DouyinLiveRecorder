@@ -28,7 +28,7 @@ Requires-Python: >=3.14
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: requests>=2.34.2
-Requires-Dist: urllib3>=2.7.0
+Requires-Dist: urllib3>=2.8.0
 Requires-Dist: loguru>=0.7.3
 Requires-Dist: pycryptodome>=3.23.0
 Requires-Dist: distro>=1.9.0
@@ -137,8 +137,8 @@ docker compose up -d
 #       并建议开启 web_auth_enable = true 配置访问密码
 docker compose --profile web up -d
 
-# 或本地构建并启动
-docker build -t douyin-live-recorder .
+# 或本地构建并启动（APP_VERSION 取自 pyproject.toml；缺省则镜像 LABEL version 固化为空串）
+docker build --build-arg APP_VERSION="$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" -t douyin-live-recorder .
 docker run -d -v ./config:/app/config -v ./downloads:/app/downloads -v ./logs:/app/logs -v ./backup_config:/app/backup_config douyin-live-recorder
 ```
 
@@ -503,6 +503,14 @@ web_allowed_hosts =
 
 > `web_host` 在仓库默认配置中为 `127.0.0.1`（仅本机可访问）。Docker 或需局域网/公网访问时改为 `0.0.0.0`，并务必同时开启 `web_auth_enable` 与 `web_password`。
 
+### GUI 界面配置 (config/config.ini)
+
+```ini
+[GUI]
+# 界面主题：light | dark | high_contrast（留空跟随系统外观明暗；GUI 侧边栏「界面主题」菜单选择后自动写回）
+gui_theme =
+```
+
 ### 直播间配置 (config/URL_config.ini)
 
 抖音支持以下 5 种直播间/主页地址格式（其余平台格式见下方各平台示例）：
@@ -809,7 +817,7 @@ uv sync --dev
 
 # 或使用 pip
 pip install -r requirements.txt
-pip install pytest pytest-asyncio black isort mypy
+pip install .[dev]
 ```
 
 ### 代码规范
@@ -985,6 +993,45 @@ brew install node
 
 ## ⏳ 更新日志
 
+### v4.4.0 (2026-09-29 ~ 2026-10-01) — Web 面板 FastAPI → Starlette 迁移（移除 fastapi/pydantic，24 条路由契约逐字保留）/ Web 前端动效层与移动端适配 / GUI 主题层（阶段3）与长文案自适应折行根除 DPI 卡死 / 两轮全量代码审查与 P0 修复（standalone SSRF 三道防线、ffmpeg 命令日志脱敏等）/ i18n 盲区补录 / 依赖与文档多轮对账
+
+> 本版本（v4.4.0，2026-09-29 ~ 10-01）为一次「UI 现代化 + 全量审查修复」周期。三点最值得注意：① **Web 后端从 FastAPI 迁移到 Starlette 直接驱动**——自研路由适配器与零依赖校验层，24 条路由契约与全部安全不变量逐字保留，运行时依赖 23 → 21；② **两轮全量代码审查**（`CODE_REVIEW_2026-09-29_2` 31 编号全落地 + `CODE_REVIEW_2026-09-30` 严重 2 / 中等 51 / 轻微 160、P0 已修）清掉 standalone 独立发行版的 SSRF/本地文件读取链、ffmpeg 命令凭据明文落盘等一批静默失效形态；③ **GUI 主题层（阶段3）** 与 **Web 前端动效层（阶段1）** 落地，GUI 长文案自适应折行根除两侧裁切与 DPI 重缩放卡死。**存在破坏性变更（依赖面）**，见下方专节。详细根因与验证见 [CODE_WIKI.md](CODE_WIKI.md)。
+
+**✨ 新增功能 / 改进**
+- **GUI 主题层（阶段3）**：新增 `src/ui_theme.py`（零显示依赖、可无头 import）——13 个语义槽位 × 三套主题（浅色 / 深色 / 高对比度），侧边栏「界面主题」菜单运行时切换并持久化到 `config.ini [GUI] gui_theme`；WCAG 对比度机检（正文 4.5 / 非文本与禁用 3.0）由 `tests/test_ui_theme.py`（34 用例）持续回归。
+- **Web 前端动效层（阶段1）**：新增 `web/motion.js`（零依赖 IIFE，挂载 `window.__dlrMotion`）——滚动入场（IntersectionObserver 错峰）/ 视差粒子（数量按视口自适应、低核设备减半）/ `prefers-reduced-motion` 全降级 / 页面隐藏暂停 / `destroy()` 无残留定时器；`web/index.html` + `web/style.css` 接线；`tests/frontend/test_motion.mjs` 5 用例（node:test 沙箱，零 npm 依赖）。
+- **Web 后端自研适配层**（随迁移新增）：`src/web_models.py`（9 个纯标准库 dataclass 请求模型，替代 pydantic）+ `src/web_api.py::_route` 路由适配器（JSON body 解析 / Query 上下界夹取 / 同步端点线程池派发 / JSONResponse 包装），24 个路由处理器函数体零改动。
+- **`retry` 复合动作新增 `fail_fast_codes` 入参（按退出码分档）**：不传时既有 16 个调用点行为逐字不变；web smoke 调用点传 `"2"`，配置类错误立即失败不进入退避——不得为了流水线变绿退 0 或降级 warning。
+- **两道新测试防线**：R7 真机脚本模板 AST 门禁（`__main__` 守卫 / 收集期零副作用 / argv 两步守卫 / 按平台前缀清理，5 个 live_collector 同批加固）；R8 全仓 `MUTATION-` 残留扫描（变异验证未还原即判红，配套三条硬约束写回 AGENTS.md）。
+- **新增动态路由契约锁** `tests/test_web_api_routes.py`（24 条 method/path 精确集合 + `/web` 挂载点），取代被敏感门禁拦截的静态基线 JSON。
+
+**🐛 修复的问题**
+- **standalone 独立发行版孪生漂移（严重 2 项）**：① 探针/录制链 SSRF 与本地文件读取链（默认 `build_opener` 注册 FileHandler + 候选无协议/内网判定 + ffmpeg 缺 `-protocol_whitelist` 三层叠加，`file://` 与云元数据地址可被「探测→放行→录制落盘」完整走通）——补显式 Handler 白名单、`_untrusted_stream_target_reason` 内网判定（含 `2130706433`/`0x7f000001` 等缩写形态）与两处 `-protocol_whitelist`；② 完整 ffmpeg 命令（含 Cookie 头与带 token 流地址）逐轮明文落 `logs/ffmpeg.log`——写入前经 `_mask_ffmpeg_cmd_for_log` 脱敏。
+- **P0 六项**：磁盘满暂停期退出的房间不再永久残留 `running_list`（空间恢复后全部房间不再拉起的根因）；GUI 保存配置改真原子写（POSIX 下不再把 0600 收紧还原成 umask 权限）；Web 口令 strip 三处统一（首尾带空格的口令不再认证自锁 403）；`update_config_line` 移除无引号值行内注释回落启发式（含 ` #` 的配置值不再被静默污染）；header 形态驼峰凭据（`myToken:`/`sessionKey:` 等）恢复脱敏；`replace_url` 改段级精确匹配（URL 前缀重叠的兄弟房间行不再被「地址失效自动注释」整行误伤）。
+- **全量审查修复 31 编号**：Shopee 短链落地页双闸（域族白名单 + 内网判定，不可信即丢弃跳转、剥离 Cookie）；异步 HTTP **逐跳**重定向内网复检；`sync_req` scheme 白名单 opener（不再注册 file/ftp/data handler）；PandaTV/WinkTV 等平台进日志的原始 URL 一律脱敏；快手 did / B站 buvid 跨代理出口不再串用设备指纹；`anchor_name` 为 None 不再崩掉整轮解析；TikTok HLS-only 房间「选流畅实拉原画」且无降级提示的选档缺陷；B站弹幕 host 轮换「假关闭」吞真实断连；Web 认证拒绝文案不再被 stdio 重定向吞掉；`tr()` 二次异常不再顶掉原始异常；前端 reauth 口令改掩码弹窗、三条轮询链代次令牌防失联定时器；GUI 状态行匹配串按语言惰性重算、`after` 自续期链 `try/finally` 防永久断裂、「停止录制/彻底退出」共用单飞入口、tail 线程逐事件容错；真机脚本收集期真连平台/清空输出目录的会话污染（`pytest --collect-only` 20.55 秒 → 0.81 秒）。
+- **同步探针内网收口**：同步探针此前连初始 URL 的内网/回环/云元数据判定都没有（协议形态白名单挡得住 `file://`、挡不住 `http://127.0.0.1:6379`）——`_probe_client()` 单点工厂 + 发请求前初始判定 + `RedirectHopRejected` 收敛；实测公网 HLS 走通、`127.0.0.1:6379`/`169.254.169.254`/`10.0.0.5`/CGNAT 全拒（末位候选也不放行）。
+- **GUI 长文案两侧裁切与 DPI 卡死（同根因两批修复）**：`_bind_adaptive_wraplength` 自适应折行根除 pack 两侧对称裁切（5 处同形态一并修复）；随后把 `<Configure>` 同步追写改为「真防抖（风暴安静 120ms 才结算）+ 迟滞（|Δ| ≤ max(12, 2%) 不写）+ TclError 竞态守护」，根除与 CTk DPI 重缩放递归互泵的事件风暴（整窗卡死 / 文字高频闪烁 / 元素渲染不完整）。
+- **Web 面板移动端适配**：顶栏两行化（固定 56px → min-height + ≤768px 换行）、`viewport-fit=cover` + `env(safe-area-inset-*)` 安全区适配、`100dvh` 动态视口、三张数据表窄屏面板内横向滚动——消除 iPhone 16 Pro Max / Pixel 10 上的顶栏裁切与整页横向滚动。
+- **i18n 盲区补录**：提取器三类盲区（`print_colored` / `messagebox` / 推送正文）的用户可见文案全部 tr 化，四语目录登记 16 条新词条并重编 `.mo`；zh_TW 顺带去重 7 条重复键，四目录键集恢复严格一致（808 键）。
+
+**⚠️ 破坏性变更 / 行为变化**
+- **移除 `fastapi` / `pydantic` 运行时依赖**（明细见下方「依赖变更」）：Web 面板的 24 条路由、请求/响应形态、安全头与鉴权中间件行为不变；内部请求模型改 `.parse()` 读取，对外部使用方无 API 面变化。仅在面板之外直接 import 这两个包的自定义部署需要自行调整。
+
+**📦 依赖变更**
+- **运行时依赖 23 → 21 条**：删除 `fastapi>=0.140.0` 与 `pydantic>=2.13.4`；`requirements.txt` 与 `pyproject.toml [project.dependencies]` 包名集合逐项相等（回归锁 `tests/test_regression_2026_09_22_gates.py`），`uv.lock` 与 `DouyinLiveRecorder.egg-info` 经 `scripts/sync_metadata.py` 重建（二包零残留）。
+- **CI typecheck job 补装固定版本 `pytest==9.1.1`**：`tests/` 的类型检查不再半盲（fixture 与 `pytest.fail()` 的 `NoReturn` 恢复可见）。
+- **文档依赖口径修复**：双语 README「安装开发依赖」pip 行由 5 条（缺 `pytest-cov`，照此装出的环境跑不了覆盖率门禁）改为 `pip install .[dev]` 单源形态（指向 `[project.optional-dependencies].dev` 六条）。
+
+**🛠️ 仓库维护与文档**
+- **两轮全量代码审查**：`docs/worklog/CODE_REVIEW_2026-09-29_2.md`（31 编号按 P0+P1+P2 全落地）与根目录 `CODE_REVIEW_2026-09-30.md`（18 批逐文件深审约 42,000 行生产代码 + 56,200 行测试，严重 2 / 中等 51 / 轻微 160，Mimosa 深扫交叉证据）；P0 已落地，P1/P2 待后续批次，standalone「回灌对齐」建议单独立项。
+- **`AGENTS.md` 多轮对账与精简**：7 项事实同步（用例数 / 符号名 / 调用点数等旧读数更正）+ 信息保真精简 19 处（110,287 → 108,469 字节；门禁 bash 块与全部章节标题逐字未动，三道文档锁 73 passed / 1 skipped 不变）；stop-hook 凭据风险提示经核查为误报后按建议把红线措辞显式化。
+- **元数据对账**：15 个文件对照 `pyproject.toml` 全量核对（版本 4.4.0 / 21 条依赖 / 镜像与服务名 / 端口与挂载 / 打包参数），唯一漂移即上述 README dev-deps 行；`pyproject` `filterwarnings` 两条注释归因由「fastapi testclient」更正为 `starlette.testclient` 本体。
+
+**🧪 测试与验证**
+- 全量 `pytest` **3690 passed / 14 skipped / 0 failed / 0 警告**（2026-10-01 本机实测；14 条 skip 均为平台条件性：符号链接特权缺失、Windows chmod 只读位语义、SIGKILL POSIX 形态、h2 已装致缺依赖分支不可达等）。
+- 覆盖率 44 模块全部达阈（总 84.76%，09-30 实测）；basedpyright 0 error / 0 warning；`run_gates.py` 8/8 全绿。
+- 真机验证（09-29 ~ 09-30）：抖音 PASS（59 条 / SRT 4518 字节）、B站 PASS（9 条 / 678 字节）、虎牙 WARN（连接正常、该时段无弹幕）、Twitch WARN、斗鱼 SKIP(房间未开播，解析链正常)、TikTok SKIP(无出境网络)；standalone `--dry-run` 虎牙真实在播房间 PASS（S-01/S-02 增量验证）；公网 HLS 分片探针走通且四类内网目标全拒。GUI 目视项、斗鱼/TikTok 活房间复跑、打包体积复测等交回动作见 [CODE_WIKI.md](CODE_WIKI.md)。
+
 ### v4.3.0 (2026-09-16 ~ 2026-09-27) — P0 修复 ffmpeg master 构建下录制 100% 失败（`-thread_queue_size` 被上游收窄为输出专属选项）/ 布尔配置解析口径统一（`true/false` 致 8 项配置静默失效、9 个海外平台无法录制）/ 两轮全量代码审查（62 + 106 项分级修复）/ 供应链加固（官方哈希优先 + GPG 验签 + 删除蓝奏云兜底）/ 发布链四处故障修复（**对外分发的 lite 包一度从未真正存在**）/ Apple Silicon 的 ffmpeg PATH 让位策略 / 日志房间关联字段与 `/health` 探活端点 / 构建产物体积 −21.6% / 覆盖率 73.28% → 82.03%（专项）与 83.91%（09-27 终态）
 
 > 本版本（v4.3.0，2026-09-16 ~ 09-27）为一次以「正确性 + 供应链安全」为主线的收敛周期。四处最值得注意：① **P0**：ffmpeg master 构建把 `-thread_queue_size` 收窄为输出专属选项，我们仍放在 `-i` 之前，导致该构建下**每一次录制都以 `-22 (EINVAL)` 退出、零字节产物**；② **布尔配置解析口径统一**：`config.ini` 写 `true/false` 曾被判为无效并**静默**回落硬编码兜底值（无告警无日志），实测致 8 项配置生效值漂移，其中最严重的一项使 9 个海外平台 100% 无法录制，现已统一为「`是/否` 与 `true/false`/`1/0`/`yes/no`/`on/off` 等价」；③ **两轮全量代码审查**（09-19 的 62 项：严重 12 / 中等 22 / 轻微 28；09-21 的 `CODE_REVIEW_2026-09-20` 106 项：严重 10 / 中等 70 / 轻微 26）把 SSRF、面板接管、凭据明文落盘、弹幕线程死循环等一批静默失效形态一次性清掉；④ **发布链四处故障**（09-26 ~ 09-27），其中最影响用户的一条是：`make_zip` 用 `Path.with_suffix(".zip")` 收尾，而版本号本身带点，lite 与 full 算出同一个附件名，第二次以覆盖模式原地截断第一次，**某次 Release 实际只留下一个既无平台也无变体标识的包，精简版从未分发出去**。**存在破坏性变更**，见下方专节。详细根因与验证见 [CODE_WIKI.md](CODE_WIKI.md)。
@@ -1099,7 +1146,7 @@ brew install node
 ### 更早的更新日志（已归档）
 
 17 条 2024-07-13 ~ 2026-09-06（v4.0.0 ~ v4.0.9.4）的发布说明条目已于 2026-09-28 逐字迁出至 [release-notes-history-zh.md](docs/changelog/release-notes-history-zh.md)；该卷同时按 `.workbuddy/docold` 基线回补了上一轮粗剪留下的行尾 `…` / 句中截断（口径见其卷首）。
-迁出原因：仅「更新日志」一节就占本文件 33.2% 的字符数（21,181 / 63,742）。根文档只保留最近三个正式发布（v4.3.0/v4.2.0/v4.1.0） + 本指针，正文才恢复可读。
+迁出原因：仅「更新日志」一节就占本文件 33.2% 的字符数（21,181 / 63,742）。根文档只保留最近正式发布 + 本指针，正文才恢复可读。[2026-10-01 更正：收录 v4.4.0 起为四个（v4.4.0/v4.3.0/v4.2.0/v4.1.0），原口径为「最近三个」]
 
 ## 💬 有问题或者需求可以向我提 Issue，欢迎 Star 与 Fork
 
