@@ -1624,6 +1624,27 @@ python scripts/smoke_test.py -c scripts/smoke_web.json -r smoke_report.html -f h
 > 脚本：`tests/test_{bili,douyin,douyu,huya,twitch}_live_collector.py`（`python file.py <URL> [秒数]`，
 > 需活房间 + 外网，默认人工通道）。
 
+### v4.4.0-dev (2026-10-01) — 会话改动按模块归档：AGENTS.md 信息保真精简（−1,818 B / −21 行，19 处）+ stop-hook 红线措辞硬化；本会话无生产代码改动、无文件增删
+
+- **改动面声明**：本会话全部改动集中在仓库约定与用户文档，**无新增功能、无生产代码（`src/`/根入口/`build_exe.py`/`scripts/`）改动、无文件新增或删除**；「删除项」仅为 AGENTS.md 内的冗余文本（见下表）。运行时行为零影响，故无真机验证项。
+- **按模块改动清单**：
+
+| 模块 | 文件 | 类型 | 改动内容 |
+| --- | --- | --- | --- |
+| 仓库约定 | `AGENTS.md` | 修改 | 信息保真精简 19 处：删除冗余重复 2（「格式化命令」节 mypy 指针条目、「safe-delete 护栏」条目内嵌的重复 PowerShell 清理命令）；合并相近条目 4 组（注释约定「写为什么+三层次」、调度中枢 ConcurrencyScheduler 两条、测试收尾清理「范围+核对」两条、Python 版本↔已知坑 PEP 758 去重）；压缩已被推翻的考古链/历史读数 8 处（依赖 21 条复核史、安全下限旧区间、回归测试旧读数、弹幕接线点 `[历史注]`、质量门禁旧条目转述、M-28 计数、假绿用例重写史等）；措辞收紧 5 处（M-26、wraplength、Web 后端尾注、skipif、配置键审计）。「格式化命令」bash 块与全部 `##`/`###`/`####` 章节标题逐字未动，37 处「回归锁」引用与判据读数逐字保留。110,287 → 108,364 字节（−1,818 B）、519 → 498 行、纯 CRLF 保持 |
+| 仓库约定 | `AGENTS.md`（CI/workflow·配置键审计条） | 修改 | Mimosa stop-hook 处置：该条被扫描器判为「敏感文件+对外发送」组合风险，核查为误报（该行是防泄露禁止性约定，审计对象是脱敏模板的键名而非凭据值）后按建议硬化为「**禁止**把真实凭据写入提交或以任何形式外传（红线见「风险控制（前置）·凭据与敏感配置红线」）」——语义不变、禁止意图显式化（108,364 → 108,469 字节） |
+| 用户文档 | `README.md` / `README_EN.md` | 修改 | 「安装开发依赖」pip 行 `pip install pytest pytest-asyncio black isort mypy`（5 条、缺 `pytest-cov`，照此装出的环境跑不了覆盖率门禁）→ `pip install .[dev]`（单源指向 `[project.optional-dependencies].dev` 六条，与 AGENTS.md「依赖管理」同口径）；细节见同日上一条目（元数据同源对账） |
+| 更新日志 | `CODE_WIKI.md` / `CODE_WIKI_EN.md` | 修改 | 本日两条目（元数据同源对账 + 本条）中英双份同步登记 |
+
+- **验证**：`run_gates.py --list` 从精简后的 AGENTS.md 解析出全部 8 条门禁且顺序不变；`tests/test_run_gates.py`+`tests/test_regression_2026_09_22_gates.py`+`tests/test_check_annotations.py` = **73 passed / 1 skipped**（与 2026-09-30 基线一致）；`tests/test_regression_2026_09_22_gates.py`（含「从 AGENTS.md 解析门禁清单」来源锁）单独复跑 **27 passed**；`diff` 章节标题 HEAD vs 新版 **ALL HEADINGS IDENTICAL**；行尾核验：本批全部改动文件保持纯 CRLF（AGENTS.md 498 行、双 README 1049/1050 行、双 CODE_WIKI 同形态）。
+
+### v4.4.0-dev (2026-10-01) — 元数据同源对账（15 文件 vs `pyproject.toml`）：仅 README 开发依赖指引漂移一处，其余零改动
+
+- **对账范围**：`AGENTS.md` / `docker-compose.yaml` / `requirements.txt` / `Dockerfile` / `.gitignore` / `.dockerignore` / `.coveragerc-concurrency` / `config/config.ini` / `CODE_WIKI.md` / `CODE_WIKI_EN.md` / `README.md` / `README_EN.md` / `DouyinLiveRecorder.egg-info` / `build_exe.py` / `uv.lock`，以 `pyproject.toml` 为唯一事实源核对版本号 4.4.0、项目名与三入口、Python >= 3.14、21 条运行时依赖及下限、镜像 / 服务名、端口 8000 与四个挂载目录、`build_exe.py` 打包参数。
+- **唯一改动**：`README.md` / `README_EN.md`「安装开发依赖」pip 行 `pip install pytest pytest-asyncio black isort mypy`（5 条，缺 `pytest-cov`——照此装出的开发环境跑不了覆盖率门禁 `pytest --cov=src`）改为规范形态 `pip install .[dev]`（单源指向 `[project.optional-dependencies].dev` 六条，与 `AGENTS.md`「依赖管理」同口径，此后 extras 增删无需再改文档）。
+- **核对佐证**：`sync_metadata.py --check` OK（uv.lock / egg-info 均 4.4.0）、`check_version.py` PASS；egg-info `Requires-Dist` 21 条与 dev/gui/build extras 逐项一致（setuptools 把 `protobuf` 规格规范化为 `<8,>=6.33.5`，顺序差异非漂移）、`uv.lock` 无 fastapi/pydantic 残留；`.coveragerc-concurrency` omit 23 条 + `exclude_also` 4 条与 pyproject 逐条一致；README 改动为单行替换，行尾形态不变（两文件仍纯 CRLF）。
+- 纯文档改动：不涉录制链路，无真机验证项；门禁按「完成定义」豁免只跑受影响面。
+
 ### v4.4.0-dev (2026-09-30) — i18n 盲区补录批次：提取器盲区①②③的用户可见文案 tr 化 + 四语目录同步登记 16 条 + zh_CN.mo 重编
 
 **调用点 tr 化（先查表后插值，消除「目录有词条但运行时永远查不到」）**
