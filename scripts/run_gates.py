@@ -108,7 +108,7 @@ def ensure_utf8_streams() -> None:
             continue
         try:
             reconfigure(encoding="utf-8", errors="replace")
-        except ValueError, OSError:
+        except (ValueError, OSError):
             # 已被重定向到已关闭/非法句柄时静默放过：本函数只改善输出，不参与判定。
             pass
 

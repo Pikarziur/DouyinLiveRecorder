@@ -290,7 +290,7 @@ def send_email(
         if smtp_obj:
             try:
                 _ = smtp_obj.quit()
-            except smtplib.SMTPException, OSError:
+            except (smtplib.SMTPException, OSError):
                 pass
 
 

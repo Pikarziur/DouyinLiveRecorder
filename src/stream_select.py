@@ -1188,7 +1188,7 @@ def select_source_url(
         probe_client = _probe_client(
             _PROBE_TIMEOUT_SECONDS, proxy_addr, _http_config.get_effective_ssl_verify(platform)
         )
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         probe_client = None
     try:
         # MID-19：record_url 通道先过形态白名单——不合规直接摘掉该档（连探针都不发），

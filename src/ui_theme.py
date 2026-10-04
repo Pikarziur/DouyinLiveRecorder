@@ -171,7 +171,7 @@ def load_theme_preference(config_file: str | Path) -> str:
     parser = configparser.ConfigParser(interpolation=None)
     try:
         parser.read(config_file, encoding="utf-8-sig")
-    except OSError, configparser.Error:
+    except (OSError, configparser.Error):
         # 损坏/不可读的配置按「未设置」处理：主题选择永远不能阻断 GUI 启动
         return ""
     if not parser.has_section(GUI_SECTION):

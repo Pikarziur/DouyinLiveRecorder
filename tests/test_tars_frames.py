@@ -141,7 +141,7 @@ def test_every_truncated_prefix_fails_fast_and_never_rewinds() -> None:
             stream = TarsInputStream(data)
             try:
                 fn(stream)
-            except ValueError, IndexError, struct.error:
+            except (ValueError, IndexError, struct.error):
                 # 允许的错误形态都属「立刻失败」（异常类型的不对称由下面的专用用例记录）
                 pass
             # C4：无论成功还是抛错，游标都不许回退到负数或越过缓冲末尾

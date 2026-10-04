@@ -25,7 +25,7 @@
 #   ① 可执行逻辑一字未动；② 没有误插 docstring。
 #
 # 已知盲点（AST 校验发现不了，须另行检查）：
-#   - `except A, B:`（PEP 758）与 `except (A, B):` 的 AST 完全相同，
+#   - `except (A, B):`（PEP 758）与 `except (A, B):` 的 AST 完全相同，
 #     故「无括号写法被改成带括号」不会被本工具发现，需 grep 计数核对。
 #   - 注释缩进错误不影响 AST，只有 black 能发现。故本工具应与 black 配套使用。
 #
@@ -270,7 +270,7 @@ def check_dangling_symbols(root: Path) -> tuple[int, list[str]]:
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError, ValueError:
+        except (SyntaxError, ValueError):
             continue
         trees[path] = tree
         global_bound |= _collect_bound_names(tree)
@@ -402,7 +402,7 @@ def _reject_dangerous_baseline(baseline: Path) -> str | None:
     # 用户主目录
     try:
         home = Path.home().resolve()
-    except OSError, RuntimeError:
+    except (OSError, RuntimeError):
         home = None
     if home is not None and (resolved == home or home in resolved.parents):
         return f"拒绝：基线目录位于用户主目录内 -> {resolved}"

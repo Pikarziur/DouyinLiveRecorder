@@ -131,6 +131,18 @@ async def _read_json_body(request: Request) -> object:
         raise HTTPException(status_code=422, detail="请求体不是合法 JSON")
 
 
+def extract_first_live_url(text):
+    # purify shared text into first live short url
+    if not text:
+        return None
+    import re
+    pat = r'https?://[A-Za-z0-9._/~%?=&+-]+'
+    mm = re.search(pat, text)
+    if not mm:
+        return None
+    return mm.group(0)
+
+
 def _route(app: Starlette, methods: list[str], path: str) -> Callable[[Callable[..., object]], Callable[..., object]]:
     # 装饰器工厂：把 FastAPI 风格的端点（模型参数 / Query 参数 / dict→JSON 返回）适配到 Starlette。
     def _decorator(handler: Callable[..., object]) -> Callable[..., object]:
@@ -320,7 +332,7 @@ def _clamp_token_expiry(raw: object) -> float:
     # 用 float() 而非 int()：配置文件可能写 "86400.0"/"1e6"，int() 会抛 ValueError 把登录打成 500。
     try:
         value = float(cast(float, raw))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 86400.0
     # NaN 与任何比较都为假，必须先显式挡掉，否则下面的 min/max 会把 NaN 原样透传
     if value != value:
@@ -834,17 +846,29 @@ def create_app(
             # 故仅按 running_list 判定。且必须精确匹配：前缀子串匹配会把短 URL 的录制状态
             # 错误地套到长 URL 上（I3）
             r["recording"] = any(r["url"] == u for u in running)
+        # 无显式画质段的房间视为「跟随全局默认画质」：quality 置空（与 URL_config.ini 存盘语义一致），
+        # 前端据此显示「默认画质（<全局值>）」而非误导性的「原画」。显式选「原画」的房间仍保留 "原画"。
+        for r in rooms:
+            _content = r.get("raw_line", "").rstrip("\n").rstrip("\r").strip()
+            if _content.startswith("#"):
+                _content = _content.lstrip("#").strip()
+            _parts = re.split(r"[,，]", _content)
+            _first = _parts[0].strip() if _parts else ""
+            _has_explicit = bool(_first) and ("://" not in _first) and ("." not in _first) and _first in BUILTIN_QUALITIES
+            if not _has_explicit:
+                r["quality"] = ""
         return rooms
 
     @_route(app, ["POST"], "/api/rooms")
     def add_room(req: RoomCreate) -> dict[str, object]:
         # MID-34：同步 def —— validate_room_target 会做 DNS 解析（SEV-03），
         # 落盘又是整文件读 + os.replace；放在事件循环里会让一个慢域名卡死整个面板。
-        url = normalize_url(req.url)
+        clean_url = extract_first_live_url(req.url) or req.url
+        url = normalize_url(clean_url)
         try:
             # SEV-02：显式校验保留在此处（与 format_url_line 内下沉的校验同一入口、同一裁决），
             # 目的是把 ValueError 收敛成 422；format_url_line 里那次是纵深防御。
-            validate_room_target(req.url, req.quality, req.name)
+            validate_room_target(clean_url, req.quality, req.name)
             line = format_url_line(url, req.quality, req.name)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
@@ -1021,6 +1045,18 @@ def create_app(
             changed = update_room_quality(cast(str, app.state.url_config_file), url, quality)
         return {"ok": True, "changed": changed}
 
+    # 读取全局默认画质（config.ini [录制设置] 的「原画|超清|高清|标清|流畅」键，与录制引擎 video_record_quality 同源）。
+    # 列表里「默认画质」房间据此显示为实际生效档位（如「默认画质（高清）」），而非误导性的「原画」。
+    def read_default_quality(config_file: str) -> str:
+        parser = configparser.ConfigParser(interpolation=None)
+        _ = parser.read(config_file, encoding="utf-8-sig")
+        raw = ""
+        if parser.has_section("录制设置"):
+            raw = parser.get("录制设置", "原画|超清|高清|标清|流畅", fallback="")
+        q = (raw or "").strip()
+        return q if q in BUILTIN_QUALITIES else "原画"
+
+
     # 画质选项：WEB 直播间设置的画质下拉与 GUI 画质监控的切换菜单共用同一份列表，
     # 落地 config.ini [录制设置]/自定义画质选项(逗号分隔)，保证两端选项一致。
     @_route(app, ["GET"], "/api/rooms/qualities")
@@ -1029,6 +1065,7 @@ def create_app(
         return {
             "options": read_quality_options(cast(str, app.state.config_file)),
             "builtin": list(BUILTIN_QUALITIES),
+            "default_quality": read_default_quality(cast(str, app.state.config_file)),
         }
 
     @_route(app, ["PUT"], "/api/rooms/qualities")

@@ -808,7 +808,7 @@ async def get_huya_stream_url(json_data: dict[str, object], video_quality: str |
     bit_rate = game_live_info.get("bitRate") or 0
     try:
         max_ratio = int(bit_rate)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         max_ratio = 0
     # exsphd 档位表（可能含 264_0/264_500 等，转 int 集合）
     exsphd_ratios: set[int] = set()

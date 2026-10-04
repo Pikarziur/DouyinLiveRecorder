@@ -1287,7 +1287,7 @@ def _r8_scan_repo(paths: list[Path] | None = None) -> list[tuple[str, int, str]]
         seen.add(key)
         try:
             body = path.read_text(encoding="utf-8")
-        except OSError, UnicodeDecodeError:
+        except (OSError, UnicodeDecodeError):
             # 读不动的文件不作判据：StopRecording.vbs 按 AGENTS 规定存 UTF-16 LE，
             # 它既不在扫描根内、后缀也不在集合内，这里只是兜底而非放宽。
             continue

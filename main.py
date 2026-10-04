@@ -592,10 +592,12 @@ PLATFORM_HOST = [
     "v.douyin.com",
     "www.douyin.com",
     "live.kuaishou.com",
+"v.kuaishou.com",
     "www.huya.com",
     "www.douyu.com",
     "www.yy.com",
     "live.bilibili.com",
+    "b23.tv",
     # MID-04 修复（2026-09-20）：摘除 www.redelight.cn —— 该 host 无任何解析入口
     # （spider/stream/JS 签名脚本全仓零引用，平台清单亦无对应平台名），留着只会让用户配一个
     # 「每轮一条 error、永不录制、也不记 record_error」的地址：房间线程走 _resolve_unrecognized
@@ -3028,6 +3030,51 @@ def _resolve_custom_stream(ctx: _PlatformResolveContext) -> None:
     ctx.new_record_url = new_record_url
 
 
+
+
+def _resolve_b23_tv(ctx):
+    # b23.tv 是 B 站通用短链，跟随 302 到真实地址；仅当落点是 live.bilibili.com 直播间才委托 B 站解析。
+    record_url = ctx.record_url
+    proxy_address = ctx.proxy_address
+    platform = "哔哩哔哩直播"
+    port_info = {}
+    record_danmaku_args = None
+    new_record_url = ""
+    try:
+        resolved = asyncio.run(spider.get_bilibili_short_link_target(record_url, proxy_address))
+    except Exception as e:
+        logger.warning("b23.tv 短链重定向失败（本轮按未识别处理）: " + utils.mask_credentials(record_url) + " - " + type(e).__name__ + ": " + str(e))
+        ctx.unrecognized = True
+        return
+    if not resolved or "live.bilibili.com" not in resolved:
+        logger.warning("b23.tv 短链未指向 B 站直播间，跳过: " + utils.mask_credentials(resolved or record_url))
+        ctx.unrecognized = True
+        return
+    ctx.record_url = resolved
+    _resolve_live_bilibili_com(ctx)
+
+
+
+def _resolve_v_kuaishou_com(ctx):
+    record_url = ctx.record_url
+    proxy_address = ctx.proxy_address
+    platform = "快手直播"
+    port_info = {}
+    record_danmaku_args = None
+    new_record_url = ""
+    try:
+        resolved = asyncio.run(spider.get_kuaishou_short_link_target(record_url, proxy_address))
+    except Exception as e:
+        logger.warning("v.kuaishou.com 短链重定向失败（本轮按未识别处理）: " + utils.mask_credentials(record_url) + " - " + type(e).__name__ + ": " + str(e))
+        ctx.unrecognized = True
+        return
+    if not resolved or "live.kuaishou.com" not in resolved:
+        logger.warning("v.kuaishou.com 短链未指向快手直播间，跳过: " + utils.mask_credentials(resolved or record_url))
+        ctx.unrecognized = True
+        return
+    ctx.record_url = resolved
+    _resolve_live_kuaishou_com(ctx)
+
 def _resolve_unrecognized(ctx: _PlatformResolveContext) -> None:
     record_url = ctx.record_url
     proxy_address = ctx.proxy_address
@@ -3063,10 +3110,12 @@ _PLATFORM_RESOLVERS: tuple[tuple[Callable[[str], bool], Callable[[_PlatformResol
     # 回归锁：tests/test_regression_2026_09_22_main.py::test_every_platform_host_matches_without_scheme
     (_match_host("www.tiktok.com/"), _resolve_tiktok_com),
     (_match_host("live.kuaishou.com/"), _resolve_live_kuaishou_com),
+    (_match_host("v.kuaishou.com/"), _resolve_v_kuaishou_com),
     (_match_host("www.huya.com/"), _resolve_huya_com),
     (_match_host("www.douyu.com/"), _resolve_douyu_com),
     (_match_host("www.yy.com/"), _resolve_yy_com),
     (_match_host("live.bilibili.com/"), _resolve_live_bilibili_com),
+    (_match_host("b23.tv/"), _resolve_b23_tv),
     # MID-04（2026-09-20）+ SEV-2203 残留（2026-09-23）：两个片段一律 scheme 无关。
     # 白名单里的 xhslink.com 不限协议、get_xhs_note_info 侧判据也是 "xhslink.com" in url，
     # 而本表项曾写死 http://、第二个片段曾留着 https:// —— 于是 https://xhslink.com/... 与
@@ -3517,8 +3566,6 @@ def _build_ffmpeg_input_args(
         # 输出侧位置对 6.1 起的 release 与 master 全部合法，是本仓支持面内唯一可用位置；
         # 代价：≤9.0.2 上「强制独立输入读取线程」的效果随之失去（master 已无此机制）。
         # 回归锁：tests/test_ffmpeg_reconnect_args.py::TestOutputOnlyOptionsFollowInputFlag
-        "-thread_queue_size",
-        "1024",
         "-max_muxing_queue_size",
         tuning["max_muxing_queue_size"],
         "-correct_ts_overflow",

@@ -72,7 +72,7 @@ def _kill_process_tree(proc: "subprocess.Popen[Any]") -> None:
                 timeout=_KILL_GRACE_SECONDS,
                 check=False,
             )
-        except OSError, subprocess.SubprocessError:
+        except (OSError, subprocess.SubprocessError):
             pass
     else:
         try:

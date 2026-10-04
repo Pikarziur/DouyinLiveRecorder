@@ -313,3 +313,4 @@ pytest-cache-files-*/
 # 忽略会让「忘记删」变成永久静默。
 _out_*.txt
 _probe_*.py
+patch/

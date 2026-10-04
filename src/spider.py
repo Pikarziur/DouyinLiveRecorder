@@ -44,7 +44,7 @@ import i18n
 #     重试集中管理；不要在此直接 import httpx 发同步请求（弹幕等少数路径除外）。
 #   - 平台接口极易风控：空响应体（200+空 body）、-352、-3001/-3002/-3004 等错误码多为
 #     风控或登录态缺失，函数内已尽量带「重试一次再定罪」与回退，调用方需透传 cookies/proxy。
-#   - 本文件使用 Python 3.14 的 PEP 758 异常语法 `except A, B:`（不带括号），这是语法特性
+#   - 本文件使用 Python 3.14 的 PEP 758 异常语法 `except (A, B):`（不带括号），这是语法特性
 #     而非笔误；两种写法 black 均接受，本项目统一写无括号（约定见 AGENTS.md「代码风格」章节）。
 #     唯一例外：需要 as 绑定时必须回退为加括号写法——无括号写法配 as 是语法错误。
 #     [历史注] 旧版本条称「加括号会破坏 3.14 语义、即违反 black 门禁」，2026-09-17 实测推翻。
@@ -72,7 +72,7 @@ from .cookie_cache import fetch_cookies as _cache_fetch_cookies
 from .cookie_cache import invalidate_generic as _cache_invalidate_generic
 from .cookie_cache import singleflight as _cache_singleflight
 from .logger import logger, script_path
-from .room import UnsupportedUrlError, get_sec_user_id, get_unique_id, is_user_homepage_url
+from .room import UnsupportedUrlError, get_sec_user_id, get_unique_id, is_user_homepage_url, get_live_room_id
 from .ttwid import get_ttwid as _shared_get_ttwid
 from .utils import generate_random_string, trace_error_decorator, trace_error_decorator_or_none
 
@@ -791,7 +791,7 @@ async def get_douyin_web_stream_data(
                             continue
                         try:
                             cand_data = cast(dict[str, object], _loads_dict(candidate).get("data") or {})
-                        except json.JSONDecodeError, TypeError:
+                        except (json.JSONDecodeError, TypeError):
                             continue
                         if "origin" not in cand_data:
                             continue
@@ -804,7 +804,7 @@ async def get_douyin_web_stream_data(
                                 "VCodec", ""
                             )
                             codec = codec_val if isinstance(codec_val, str) else ""
-                        except json.JSONDecodeError, KeyError, TypeError:
+                        except (json.JSONDecodeError, KeyError, TypeError):
                             codec = ""
                         if "h265" in codec.lower() or "hevc" in codec.lower():
                             hevc_candidate = candidate
@@ -939,7 +939,10 @@ async def get_douyin_app_stream_data(
                 if data is None:
                     raise RuntimeError("Failed to get sec_user_id")
                 _room_id, _sec_uid = data
-                room_data = await get_app_data(_room_id, _sec_uid)
+                web_rid = await get_live_room_id(_room_id, _sec_uid, proxy_addr)
+                if not web_rid:
+                    raise RuntimeError("Failed to get web_rid from reflow")
+                room_data = await get_douyin_web_stream_data(f"https://live.douyin.com/{web_rid}", proxy_addr, cookies)
             except UnsupportedUrlError:
                 return await resolve_from_homepage()
 
@@ -1521,7 +1524,7 @@ async def get_token_js(rid: str, did: str, proxy_addr: OptionalStr = None) -> di
         # 容错解析保留：字符串 "2" 必须被当成 2（而非退化为 0 次迭代），故先 str() 再 int()。
         try:
             enc_time = int(str(enc_key.get("enc_time")))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             logger.warning(
                 i18n.tr("斗鱼 websec 签名参数不完整: enc_time 缺失或非数值，本轮跳过取流"),
             )
@@ -4328,7 +4331,7 @@ async def get_twitcasting_stream_url(
     # AttributeError，于是注释承诺的「解析失败 → 登录重试」在这条最常见路径上是**死分支**：
     # 受限房直接判未开播，登录态永远用不上。PEP 758 无括号写法（本分支不绑定异常对象）。
     # 回归锁：tests/test_spider.py::TestTwitCastingParseFailureLoginFallback
-    except AttributeError, ValueError:
+    except (AttributeError, ValueError):
         logger.error("Failed to retrieve TwitCasting data, attempting to log in...")
         new_cookie = await login_twitcasting(
             account_type=cast(str, account_type),
@@ -7098,3 +7101,33 @@ async def get_picarto_stream_url(
         m3u8_url = f"https://1-edge1-us-newyork.picarto.tv/stream/hls/golive+{anchor_name}/index.m3u8"
         result |= {"is_live": True, "title": title, "m3u8_url": m3u8_url, "record_url": m3u8_url}
     return result
+
+
+async def get_bilibili_short_link_target(url, proxy_addr=None):
+    # b23.tv 是 B 站通用短链，302 跳转到真实地址（直播间 / 视频 / 动态等）。
+    # 跟随重定向拿到落地 URL，由调用方判断是否为直播间。复用 room.py:get_sec_user_id 同款写法。
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        _proxy = utils.handle_proxy_addr(proxy_addr)
+        async with httpx.AsyncClient(proxy=_proxy, timeout=15, verify=http_config.ssl_verify) as client:
+            response = await client.get(url, headers=headers, follow_redirects=True)
+            return str(response.url)
+    except Exception as e:
+        raise RuntimeError("Failed to resolve b23.tv short link: " + str(e))
+
+
+async def get_kuaishou_short_link_target(url, proxy_addr=None):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        _proxy = utils.handle_proxy_addr(proxy_addr)
+        async with httpx.AsyncClient(proxy=_proxy, timeout=15, verify=http_config.ssl_verify) as client:
+            response = await client.get(url, headers=headers, follow_redirects=True)
+            return str(response.url)
+    except Exception as e:
+        raise RuntimeError("Failed to resolve kuaishou short link: " + str(e))

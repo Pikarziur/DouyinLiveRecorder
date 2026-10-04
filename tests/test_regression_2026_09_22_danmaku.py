@@ -366,7 +366,7 @@ def test_no_aliased_loguru_logger_binding_anywhere() -> None:
     for path in _scanned_python_files():
         try:
             source = path.read_text(encoding="utf-8")
-        except OSError, UnicodeDecodeError:
+        except (OSError, UnicodeDecodeError):
             continue
         offenders.extend(f"{path.relative_to(_REPO_ROOT)}:{item}" for item in _alias_offenders(source))
     assert offenders == [], f"存在别名 logger（MID-2247 回归）: {offenders}"
@@ -377,7 +377,7 @@ def test_no_interpolated_fstring_passed_to_any_logger_binding() -> None:
     for path in _scanned_python_files():
         try:
             source = path.read_text(encoding="utf-8")
-        except OSError, UnicodeDecodeError:
+        except (OSError, UnicodeDecodeError):
             continue
         offenders.extend(f"{path.relative_to(_REPO_ROOT)}:{item}" for item in _fstring_offenders(source))
     assert offenders == [], f"logger 收到 f-string 文案（翻译在查表前完成）: {offenders}"

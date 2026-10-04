@@ -309,7 +309,7 @@ def _get_coverage_json(data_file: str | None, root: Path = ROOT) -> CoverageData
         try:
             with open(tmp_path, encoding="utf-8") as f:
                 report = cast(CoverageData, json.load(f))
-        except OSError, ValueError:
+        except (OSError, ValueError):
             # 数据文件在、JSON 却读不出来：等价于「无可用数据」，同样硬失败（rc=2）。
             print(f"ERROR: failed to read coverage json report: {tmp_path}", file=sys.stderr)
             print(f"       数据文件 {resolved.as_posix()} 存在但报告不可解析。{NO_DATA_HINT}", file=sys.stderr)

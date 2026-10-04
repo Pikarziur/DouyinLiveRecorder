@@ -125,6 +125,7 @@
     // 画质选项状态：qualityOptions 为用户已选档位（渲染下拉与 chips），
     // qualityBuiltin 为引擎支持的全部内置档位（渲染「添加画质」候选项）。
     var qualityOptions = [];
+    var globalDefaultQuality = '';
     var qualityBuiltin = [];
 
     // ===== API 接口契约速查（路径/方法/关键参数/返回/前后端处理）=====
@@ -826,13 +827,12 @@
                     sseFailCount = 0;
                     renderStatus(data);
                 })
-                .catch(function () {
+                .catch(function (diagErr) {
                     if (!sseChain.isCurrent(myGen)) return;
                     sseFailCount += 1;
-                    // SEV-2228：网络层失败（后端不可达/超时）才是「已断开」这一支；
-                    // 仪表盘上的提示必须经 showStatusWarning，只写弹幕流等于没提示（见 markBackendUnreachable）。
                     markBackendUnreachable(true);
-                    showStatusWarning(t('dashboard.statusUnavailable'));
+                    var diagMsg = (diagErr && diagErr.message) ? diagErr.message : String(diagErr);
+                    showStatusWarning(t('dashboard.statusUnavailable') + '  [DIAG:catch] ' + diagMsg);
                 })
                 .then(function () {
                     if (sseStopped) return;
@@ -898,11 +898,11 @@
     // 「取证失败」改由下面两个真实信号承担：error（采样抛错）与 stale（超时回退）。
     function updateStatusWarning(s) {
         if (!s || s.error === 'status_unavailable') {
-            showStatusWarning(t('dashboard.statusUnavailable'));
+            showStatusWarning(t('dashboard.statusUnavailable') + '  [DIAG:payload_error=' + (s && s.error) + ']');
             return;
         }
         if (s.stale === true) {
-            showStatusWarning(t('dashboard.statusUnavailable'));
+            showStatusWarning(t('dashboard.statusUnavailable') + '  [DIAG:stale]');
             return;
         }
         if (s.engine_alive === false) {
@@ -916,6 +916,15 @@
     // 的状态回拉三处都调它。故「拿不到 / 不新鲜 / 引擎死」的裁决必须放在这里（经 updateStatusWarning 与
     // renderRecordingControl），放到任一调用方都会让另外两条入口的口径分叉。
     function renderStatus(s) {
+        try {
+            return _renderStatusInner(s);
+        } catch (e) {
+            var _m = 'RENDER_ERR: ' + ((e && e.message) ? e.message : String(e));
+            showStatusWarning(_m);
+            if (window.console && console.error) console.error(_m, e);
+        }
+    }
+    function _renderStatusInner(s) {
         if (!s) s = {};
         // SEV-2228：HTTP 200 也可能带 {"error":"status_unavailable"}——采样失败时后端不再回 5xx，为的是
         // 让面板继续响应。旧实现不看 error，直接把监测数/录制数/磁盘画成「-」当作成功，用户看到的是
@@ -947,6 +956,7 @@
             tbody.innerHTML = '<tr><td colspan="5" class="empty">' + emptyText + '</td></tr>';
             return;
         }
+                // recording-rows-v1: 仪表盘「正在录制」表 = 名称 / 设置画质 / 实际画质 / 开始时间 / 已录时长（5 列，与表头一致）
         var html = '';
         for (var i = 0; i < rec.length; i++) {
             var r = rec[i];
@@ -964,7 +974,7 @@
                 + '<td>' + esc(r.duration) + '</td>'
                 + '</tr>';
         }
-        tbody.innerHTML = html;
+tbody.innerHTML = html;
     }
 
     // 12b. 录制控制条：按状态快照同步「开始/停止录制」按钮与状态标签。recording_enabled 为引擎级录制
@@ -1227,17 +1237,183 @@
     // 行内开关/删除按钮靠 data-url 透传，点击由 rooms-tbody 上的事件委托转发到 toggleRoom/deleteRoom。
     // 画质列为行内下拉（选项 = 默认画质 + qualityOptions + 当前值兜底），change 委托转发 changeRoomQuality。
     // 注意：url 直接拼进 data-url 与 title，已用 esc() 转义防止属性注入；del 失败会回拉一次列表恢复 UI。
+
+    function getPlatform(url) {
+
+        var u = url || '';
+
+        var m = [
+
+            ['douyin', /douyin\.com|douyin\.cn|v\.douyin\.com/i, '抖音', 'pf-douyin'],
+
+            ['bili', /bilibili\.com|live\.bilibili\.com|b23\.tv/i, 'B站', 'pf-bili'],
+
+            ['kuaishou', /kuaishou\.com|v\.kuaishou\.com/i, '快手', 'pf-kuaishou'],
+
+            ['xhs', /xiaohongshu\.com|xhslink\.com/i, '小红书', 'pf-xhs'],
+
+            ['huya', /huya\.com/i, '虎牙', 'pf-huya'],
+
+            ['douyu', /douyu\.com/i, '斗鱼', 'pf-douyu'],
+
+            ['yy', /yy\.com/i, 'YY', 'pf-yy'],
+
+        ];
+
+        for (var i = 0; i < m.length; i++) {
+
+            if (m[i][1].test(u)) return ' <span class="platform-pill ' + m[i][3] + '">' + m[i][2] + '</span>';
+
+        }
+
+        return '';
+
+    }
+
+
+    function injectPlatformStyle() {
+
+        if (document.getElementById('platform-pill-style')) return;
+
+        var css = '.room-name-cell{font-weight:600;}'
+
+        /* pill-dark-v1 */
+
+            + '.platform-pill{display:inline-block;margin-left:8px;padding:1px 9px;border-radius:999px;font-size:12px;line-height:18px;font-weight:600;vertical-align:middle;}'
+
+            + '.pf-douyin{background:#161823;color:#fff;}'
+
+            + '.pf-bili{background:#bf4079;color:#fff;}'
+
+            + '.pf-kuaishou{background:#d2560a;color:#fff;}'
+
+            + '.pf-xhs{background:#d01b36;color:#fff;}'
+
+            + '.pf-huya{background:#c86a00;color:#fff;}'
+
+            + '.pf-douyu{background:#0b7f8a;color:#fff;}'
+
+            + '.pf-yy{background:#0a6fb4;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-douyin{background:#161823;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-bili{background:#bf4079;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-kuaishou{background:#d2560a;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-xhs{background:#d01b36;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-huya{background:#c86a00;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-douyu{background:#0b7f8a;color:#fff;}'
+
+            + 'body[data-theme="dark"] .pf-yy{background:#0a6fb4;color:#fff;}';
+
+        var st = document.createElement('style');
+
+        st.id = 'platform-pill-style';
+
+        st.textContent = css;
+
+        document.head.appendChild(st);
+
+    }
+
+
+    function fixRoomsHeader() {
+
+        var ths = ['名称', '地址', '画质', '启用', '录制中', '操作'];
+
+        var tb = document.getElementById('rooms-tbody');
+
+        if (!tb) return;
+
+        var table = tb.closest('table');
+
+        if (!table) return;
+
+        var tr = table.querySelector('thead tr');
+
+        if (!tr) return;
+
+        var cells = tr.querySelectorAll('th');
+
+        if (cells.length !== ths.length) return;
+
+        for (var i = 0; i < ths.length; i++) cells[i].textContent = ths[i];
+
+    }
+
     function buildRoomQualitySelect(url, current) {
-        // 当前值可能不在选项列表（如用户已从画质选项中移除该档位），追加为候选项防止显示错位
-        var opts = [''].concat(qualityOptions.slice());
-        if (current && opts.indexOf(current) < 0) opts.push(current);
+        // 默认房间（current 为空 = 跟随全局）：直接选中并展示全局默认画质，不显示「默认画质」选项
+        var eff = (current && current !== '') ? current : globalDefaultQuality;
+        var opts = qualityOptions.slice();
+        // 确保全局默认画质与当前显式画质都在选项内，否则选中会落空
+        if (globalDefaultQuality && opts.indexOf(globalDefaultQuality) < 0) opts.push(globalDefaultQuality);
+        if (eff && opts.indexOf(eff) < 0) opts.push(eff);
+        var seen = {};
+        opts = opts.filter(function (o) { return seen[o] ? false : (seen[o] = true); });
         var html = '<select data-action="quality" data-url="' + esc(url) + '">';
         for (var i = 0; i < opts.length; i++) {
-            var sel = opts[i] === current ? ' selected' : '';
-            var label = opts[i] === '' ? t('rooms.defaultQuality') : opts[i];
-            html += '<option value="' + esc(opts[i]) + '"' + sel + '>' + esc(label) + '</option>';
+            var sel = opts[i] === eff ? ' selected' : '';
+            html += '<option value="' + esc(opts[i]) + '"' + sel + '>' + esc(opts[i]) + '</option>';
         }
         return html + '</select>';
+    }
+
+    // ---- 直播间列表增强：平台胶囊 + 表头修正（补丁注入） ----
+    function getPlatformInfo(url) {
+        var u = (url || '').toLowerCase();
+        var rules = [
+            [['b23.tv', 'bilibili'], 'b23tv', 'B站', '#fb7299', 'rgba(251,114,153,0.14)'],
+            [['douyin'], 'douyin', '抖音', '#161823', 'rgba(22,24,35,0.10)'],
+            [['kuaishou'], 'kuaishou', '快手', '#ff6600', 'rgba(255,102,0,0.14)'],
+            [['xiaohongshu', 'xhslink'], 'xhs', '小红书', '#ff2442', 'rgba(255,36,66,0.12)'],
+            [['huya'], 'huya', '虎牙', '#ff8a00', 'rgba(255,138,0,0.14)'],
+            [['douyu'], 'douyu', '斗鱼', '#ff5d23', 'rgba(255,93,35,0.14)'],
+            [['yy.com'], 'yy', 'YY', '#0091ff', 'rgba(0,145,255,0.14)'],
+            [['twitch'], 'twitch', 'Twitch', '#9146ff', 'rgba(145,70,255,0.14)']
+        ];
+        for (var i = 0; i < rules.length; i++) {
+            var needles = rules[i][0];
+            for (var j = 0; j < needles.length; j++) {
+                if (u.indexOf(needles[j]) >= 0) {
+                    return { key: rules[i][1], label: rules[i][2], fg: rules[i][3], bg: rules[i][4] };
+                }
+            }
+        }
+        return { key: 'other', label: '直播', fg: '#6b7280', bg: 'rgba(107,114,128,0.14)' };
+    }
+
+    function buildPlatformPill(url) {
+        var p = getPlatformInfo(url);
+        return '<span class="pf-pill pf-' + p.key + '" style="--pf-fg:' + p.fg + ';--pf-bg:' + p.bg + '">' + esc(p.label) + '</span>';
+    }
+
+    function injectRoomPillStyle() {
+        if (document.getElementById('pf-pill-style')) return;
+        var css = '.pf-pill{display:inline-block;margin-left:8px;padding:1px 8px;border-radius:999px;font-size:11px;line-height:18px;font-weight:600;vertical-align:middle;color:var(--pf-fg,#6b7280);background:var(--pf-bg,rgba(107,114,128,0.14));white-space:nowrap;}'
+            + '.room-name-cell{white-space:nowrap;}'
+            + 'body[data-theme="dark"] .pf-douyin{color:#f5f5f7 !important;background:rgba(255,255,255,0.16) !important;}';
+        var st = document.createElement('style');
+        st.id = 'pf-pill-style';
+        st.textContent = css;
+        document.head.appendChild(st);
+    }
+
+    function fixRoomsHeader() {
+        var tb = document.getElementById('rooms-tbody');
+        if (!tb || !tb.closest) return;
+        var table = tb.closest('table');
+        if (!table) return;
+        var tr = table.querySelector('thead tr');
+        if (!tr) return;
+        var labels = ['名称', '地址', '设置画质', '启用', '录制中', '操作'];
+        var ths = tr.querySelectorAll('th');
+        for (var i = 0; i < ths.length && i < labels.length; i++) {
+            ths[i].removeAttribute('data-i18n');
+            ths[i].textContent = labels[i];
+        }
     }
 
     async function loadRooms() {
@@ -1248,21 +1424,21 @@
                 tbody.innerHTML = '<tr><td colspan="6" class="empty">' + esc(t('rooms.empty')) + '</td></tr>';
                 return;
             }
+                        // rooms-rows-v2: 名称(平台胶囊) / 地址 / 设置画质 / 启用 / 录制中 / 操作（6 列，与 fixRoomsHeader 表头一致）
             var html = '';
             for (var i = 0; i < rooms.length; i++) {
                 var r = rooms[i];
-                var checked = r.enabled ? ' checked' : '';
                 html += '<tr>'
+                    + '<td class="room-name-cell">' + esc(r.name) + getPlatform(r.url) + '</td>'
                     + '<td title="' + esc(r.url) + '">' + esc(r.url) + '</td>'
                     + '<td>' + buildRoomQualitySelect(r.url, r.quality) + '</td>'
-                    + '<td>' + esc(r.name) + '</td>'
-                    + '<td><label class="switch"><input type="checkbox"' + checked
+                    + '<td><label class="switch"><input type="checkbox"' + (r.enabled ? ' checked' : '')
                         + ' data-action="toggle" data-url="' + esc(r.url) + '"><span class="slider"></span></label></td>'
                     + '<td>' + (r.recording ? esc(t('common.yes')) : esc(t('common.no'))) + '</td>'
                     + '<td><button class="danger" data-action="delete" data-url="' + esc(r.url) + '">' + esc(t('rooms.delete')) + '</button></td>'
                     + '</tr>';
             }
-            tbody.innerHTML = html;
+tbody.innerHTML = html;
         } catch (e) {
             tbody.innerHTML = '<tr><td colspan="6" class="empty">' + esc(t('loadFailed')) + '</td></tr>';
         }
@@ -1276,6 +1452,7 @@
             var data = await api('/api/rooms/qualities');
             qualityOptions = Array.isArray(data.options) ? data.options.slice() : [];
             qualityBuiltin = Array.isArray(data.builtin) ? data.builtin.slice() : qualityOptions.slice();
+            globalDefaultQuality = data.default_quality || '';
             renderQualityOptions();
         } catch (e) {
             toast(t('toast.qualityLoadFailed') + (e.message || ''), 'error');
@@ -1920,10 +2097,56 @@
         if (btn) btn.textContent = next === 'light' ? '🌙' : '☀️';
     }
 
+    // rooms-column-style: 直播间列表列宽（配合列序：名称|地址|设置画质|启用|录制中|操作）
+    // 仅名称/画质/启用/录制中/操作定宽，地址列留作唯一 auto 列吃掉全部剩余宽度。
+    function injectRoomsColumnStyle() {
+        if (document.getElementById('rooms-column-style')) return;
+        var css = '#rooms-view .data-table{table-layout:fixed;}'
+            /* cols-2-3-v1 */
+            + '#rooms-view .data-table th:nth-child(1){width:calc((100% - 354px) * 0.4);}'
+            + '#rooms-view .data-table th:nth-child(2){width:calc((100% - 354px) * 0.6);}'
+            + '#rooms-view .data-table th:nth-child(3){width:122px;}'
+            + '#rooms-view .data-table th:nth-child(4){width:70px;}'
+            + '#rooms-view .data-table th:nth-child(5){width:78px;}'
+            + '#rooms-view .data-table th:nth-child(6){width:84px;}'
+            + '#rooms-view .data-table td:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}'
+            + '@media (max-width:768px){#rooms-view .data-table{min-width:720px;}}';
+        var st = document.createElement('style');
+        st.id = 'rooms-column-style';
+        st.textContent = css;
+        document.head.appendChild(st);
+    }
+
+    // config-save-fab: 配置页「保存配置」改左下角悬浮按钮（避让右下角 .toast）
+    function injectSaveFabStyle() {
+        if (document.getElementById('config-save-fab')) return;
+        var css = ''
+            + '#config-save-btn{position:fixed;z-index:60;'
+            /* centred-v1 */
+            + 'left:0;right:0;margin:0 auto;width:fit-content;'
+            + 'bottom:max(24px,env(safe-area-inset-bottom));'
+            + 'padding:12px 24px;border-radius:999px;font-size:14px;line-height:1.2;'
+            + 'box-shadow:0 6px 20px rgba(0,0,0,.22);'
+            + 'transition:transform .15s ease,box-shadow .15s ease;}'
+            + '#config-save-btn::before{content:"✓";margin-right:8px;font-weight:700;}'
+            + '#config-save-btn:hover{transform:translateY(-1px);box-shadow:0 10px 26px rgba(0,0,0,.28);}'
+            + '#config-save-btn:active{transform:translateY(0);box-shadow:0 4px 14px rgba(0,0,0,.24);}'
+            + '#config-view{padding-bottom:104px;}'
+            + '@media (prefers-reduced-motion: reduce){#config-save-btn{transition:none;}}';
+        var st = document.createElement('style');
+        st.id = 'config-save-fab';
+        st.textContent = css;
+        document.head.appendChild(st);
+    }
+
     // 23. DOMContentLoaded init
     document.addEventListener('DOMContentLoaded', function () {
         initTheme();
         initLanguage();
+        injectSaveFabStyle();
+        injectPlatformStyle();
+        injectRoomsColumnStyle();
+        fixRoomsHeader();
 
         var tabs = document.querySelectorAll('.tab');
         for (var i = 0; i < tabs.length; i++) {
@@ -1950,6 +2173,19 @@
                     showLogin();
                 });
         });
+        (function () {
+            var el = $('room-url');
+            if (!el) return;
+            var re = new RegExp("https?://[A-Za-z0-9._/~%?=&+-]+");
+            function purify() {
+                var mm = (el.value || '').match(re);
+                if (mm && mm[0] && mm[0] !== el.value.trim()) {
+                    el.value = mm[0];
+                }
+            }
+            el.addEventListener('input', purify);
+            el.addEventListener('paste', function () { setTimeout(purify, 0); });
+        })();
         $('room-add-form').addEventListener('submit', function (e) {
             e.preventDefault();
             addRoom();

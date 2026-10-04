@@ -121,7 +121,7 @@ def _guard_stdio_encoding_policy() -> Generator[None]:
         if callable(reconfigure) and isinstance(encoding, str) and isinstance(errors, str):
             try:
                 reconfigure(encoding=encoding, errors=errors)
-            except ValueError, OSError:
+            except (ValueError, OSError):
                 # 已被重定向到已关闭/非法句柄时放过：本守卫只做隔离与点名，不参与判定
                 pass
     assert not violations, (

@@ -54,7 +54,7 @@ def _quality_alert_expired(info: dict[str, str | bool | float], now: float) -> b
         return False
     try:
         alert_at = float(info.get("alert_at") or 0.0)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         # 条目被外部/旧版本数据污染（alert_at 非数值）时按「无告警时刻」处理：立即允许复位，
         # 否则该房间会永久钉在 ⚠ 降级——正是本次要修的故障形态
         return True
@@ -1119,7 +1119,7 @@ def _send_ctrl_break_to_child(pid: int) -> bool:
 def _as_float(value: object, default: float = 0.0) -> float:
     try:
         return float(cast(Any, value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 
@@ -1128,7 +1128,7 @@ def _as_int(value: object, default: int = 0) -> int:
     # 少了这一条 M-17 的「逐事件防护」会被一条脏数据重新打穿。
     try:
         return int(cast(Any, value))
-    except TypeError, ValueError, OverflowError:
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -3862,7 +3862,7 @@ class LiveRecorderGUI:
                         continue
                     try:
                         event = json.loads(line)
-                    except ValueError, TypeError:
+                    except (ValueError, TypeError):
                         continue
                     if isinstance(event, dict):
                         # M-17：防护必须落在**每条事件**上。此前 _danmaku_dispatch 里一条脏

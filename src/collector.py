@@ -421,7 +421,7 @@ class DanmakuCollector:
             try:
                 # start() 内部会阻塞直到连接关闭或 stop() 被调用（stop 经 call_soon_threadsafe 关闭 ws）
                 loop.run_until_complete(self._start_task)
-            except asyncio.CancelledError, RuntimeError:
+            except (asyncio.CancelledError, RuntimeError):
                 # 吞没即正确：这两类正是「正常停止」的形态——任务被 _shutdown 取消，
                 # 或 loop 被 _shutdown 停掉导致 run_until_complete 提前返回。
                 # 重抛会把停止动作误报成采集失败。

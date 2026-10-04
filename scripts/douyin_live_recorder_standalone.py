@@ -18,7 +18,7 @@
 #   核对漂移的机检面：tests/test_regression_2026_09_22_standalone.py、
 #   tests/test_ffmpeg_reconnect_args.py、tests/test_ffmpeg_path_preference.py。
 # * **语法基线 Python >= 3.14**：本仓统一使用 PEP 758 无括号多异常写法
-#   (except A, B:)，该语法 3.14 起才合法——请勿用 3.13 及以下版本运行本文件。
+#   (except (A, B):)，该语法 3.14 起才合法——请勿用 3.13 及以下版本运行本文件。
 # * **保留原工程的核心正确性约定**(这些是原工程踩坑后的结论，单文件版一律继承)：
 #   1. 校验探针与 ffmpeg 录制必须共用同一 UA / Referer / Cookie(record_headers 单点构造)，
 #      否则出现「探针 200、ffmpeg 403」的假绿。
@@ -94,7 +94,7 @@ for _stream in (sys.stdout, sys.stderr):
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-        except ValueError, OSError:
+        except (ValueError, OSError):
             pass
 
 # 桌面 Chrome UA：国内 CDN(虎牙/B站)会拒绝移动端 UA(403)，录制拉流必须用桌面 UA。
@@ -305,7 +305,7 @@ def dig(obj: Any, *keys: Any, default: Any = None) -> Any:
     for k in keys:
         try:
             cur = cur[k]
-        except KeyError, IndexError, TypeError, AttributeError:
+        except (KeyError, IndexError, TypeError, AttributeError):
             return default
     return cur if cur is not None else default
 
@@ -877,7 +877,7 @@ def resolve_douyin(url: str, proxy: str | None = None, cookies: str = "") -> Str
     if isinstance(data, dict):
         try:
             api_status_code = int(cast(str, data.get("status_code"))) if data.get("status_code") is not None else 0
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             api_status_code = 0
         if api_status_code != 0:
             status_msg = data.get("status_msg", "unknown error")
@@ -1896,14 +1896,14 @@ def load_settings(config_path: str) -> Settings:
 def _safe_int(text: str, default: int) -> int:
     try:
         return int(float(str(text).strip()))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 
 def _safe_float(text: str, default: float) -> float:
     try:
         return float(str(text).strip())
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 

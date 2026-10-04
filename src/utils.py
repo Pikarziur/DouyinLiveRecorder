@@ -180,7 +180,7 @@ def _js_runtime_accepts_timeout(call_fn: Callable[..., object]) -> bool:
     # （代价：那条路径上 node 子进程不会被主动 kill，仅 await 侧能脱身）。
     try:
         parameters = inspect.signature(call_fn).parameters
-    except TypeError, ValueError:  # pragma: no cover - C 实现等取不到签名的情形
+    except (TypeError, ValueError):  # pragma: no cover - C 实现等取不到签名的情形
         return False
     if "timeout" in parameters:
         return True
@@ -395,7 +395,7 @@ def is_valid_zip(path: str | Path) -> bool:
 
     try:
         return bool(zipfile.is_zipfile(path))
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return False
 
 

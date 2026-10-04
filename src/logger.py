@@ -251,7 +251,7 @@ try:
     # 的字典查表语义相反，同一份 config.ini 在两个模块里含义不同；空值与无法识别的值仍按 True
     # （保留「仅显式否才关闭」的兼容行为，避免历史配置因多余空白/大小写差异意外关掉日志文件）。
     _log_to_file = parse_config_bool(_cfg_parser.get("录制设置", "是否启用日志文件(是/否)"), True)
-except configparser.NoSectionError, configparser.NoOptionError:
+except (configparser.NoSectionError, configparser.NoOptionError):
     # 配置项缺失时保持默认启用（向后兼容）
     pass
 except Exception:

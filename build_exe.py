@@ -773,7 +773,7 @@ def _run_gpg(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess
             timeout=timeout,
             check=False,
         )
-    except OSError, subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
@@ -1647,7 +1647,7 @@ def _ensure_utf8_streams() -> None:
         if callable(reconfigure):
             try:
                 _ = reconfigure(encoding="utf-8", errors="replace")
-            except ValueError, OSError:
+            except (ValueError, OSError):
                 pass
 
 
