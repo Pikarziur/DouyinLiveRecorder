@@ -61,6 +61,10 @@ services:
 
     # 卷挂载（宿主机:容器:rw）；四个目录均不进镜像，由这里接进容器
     volumes:
+      # DEV-OVERRIDE（2026-10-03）：把源码挂成卷，改 src/room.py、src/spider.py 等解析逻辑后
+      #   只需 `docker compose up -d` 重建容器（或 restart）即可生效，无需 `docker compose build`。
+      #   注意：挂载会整体覆盖镜像内 /app/src，宿主机 ./src 必须是完整且版本对齐的源码副本。
+      - ./src:/app/src:rw
       # config：config.ini / URL_config.ini（含凭据，改一次即生效）；downloads：视频 / 音频 / 弹幕 SRT 落盘处
       # logs：streamget.log 等运行日志；backup_config：运行时修改 config 的自动备份
       - ./config:/app/config:rw
