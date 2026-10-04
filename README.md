@@ -72,9 +72,18 @@ docker compose up -d
 #       并建议开启 web_auth_enable = true 配置访问密码
 docker compose --profile web up -d
 
-# 或本地构建并启动（APP_VERSION 取自 pyproject.toml；缺省则镜像 LABEL version 固化为空串）
-docker build --build-arg APP_VERSION="$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" -t douyin-live-recorder .
-docker run -d -v ./config:/app/config -v ./downloads:/app/downloads -v ./logs:/app/logs -v ./backup_config:/app/backup_config douyin-live-recorder
+# 启动
+docker run -d \
+  --name douyin-live-recorder \
+  --restart unless-stopped \
+  -p 4040:8000 \
+  -v ./src:/app/src:rw \
+  -v ./config:/app/config \
+  -v ./downloads:/app/downloads \
+  -v ./logs:/app/logs \
+  -v ./backup_config:/app/backup_config \
+  --entrypoint python \
+  ghcr.io/pikarziur/douyinliverecorder:latest web.py
 ```
 
 > 容器内 FFmpeg 与 Node.js 由镜像自带（apt 安装），无需挂载本地 `ffmpeg/`、`node/` 目录；
@@ -320,8 +329,8 @@ mp4格式重新编码为h264 = 否
 弹幕分片时长(秒) = 1800
 # 弹幕录制平台(逗号分隔) - 目前支持的 5 个平台
 弹幕录制平台(逗号分隔) = 斗鱼直播,B站直播,虎牙直播,抖音直播,TwitchTV
-# 单次录制时长上限（秒）；0 表示不限制，默认 6 小时
-单次录制时长上限(秒,0为不限制) = 21600
+# 单次录制时长上限（秒）；0 表示不限制，默认 1 小时
+单次录制时长上限(秒,0为不限制) = 3600
 ```
 
 ### 推送配置 (config/config.ini)
@@ -416,7 +425,7 @@ twitcasting密码 =
 # Web 管理面板监听地址（默认仅本机；Docker/LAN 部署再显式改为 0.0.0.0）
 web_host = 127.0.0.1
 # Web 管理面板端口
-web_port = 8000
+web_port = 4040
 # 是否启用密码登录（true/false）
 web_auth_enable = false
 # 访问密码（启用认证时必填）
