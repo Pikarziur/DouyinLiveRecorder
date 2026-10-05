@@ -194,6 +194,20 @@
             </div>
         </div>
     </div>
+    <!-- 直播间备注编辑窗（房间名点击触发）：复用 .modal-overlay 静态节点 + .hidden 切换，
+         不引入框架、不在运行时 createElement（与 #reauth-modal 同族，保证 tests/frontend 沙箱可驱动）。
+         备注写入后合并进房间名，生成「名称(备注)」的新名称并落盘 URL_config.ini。 -->
+    <div id="room-note-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="room-note-label">
+        <div class="modal-card">
+            <label id="room-note-label" for="room-note-input" data-i18n="rooms.noteTitle">编辑直播间备注</label>
+            <div id="room-note-name" class="room-note-name"></div>
+            <input type="text" id="room-note-input" maxlength="40" autocomplete="off" data-i18n-placeholder="rooms.notePlaceholder" placeholder="输入备注，将显示为「名称(备注)」">
+            <div class="modal-actions">
+                <button type="button" id="room-note-cancel" data-i18n="common.cancel">取消</button>
+                <button type="button" id="room-note-confirm" class="primary" data-i18n="config.save">保存</button>
+            </div>
+        </div>
+    </div>
     <script src="/web/app.js"></script>
     <!-- 动效层：零依赖、自启动（DOM 就绪即 init），不依赖 app.js、不改其渲染结构，降低回归风险。 -->
     <script src="/web/motion.js"></script>

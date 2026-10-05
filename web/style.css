@@ -558,6 +558,32 @@ button.small { background: var(--primary-soft); color: var(--primary); border: n
 #reauth-cancel { border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 #reauth-cancel:hover { border-color: var(--primary); color: var(--primary); }
 
+/* ===== 直播间备注编辑窗 + 可点击房间名（2026-10-05） =====
+   房间名从纯文本改为按钮形态：保持 .room-name-cell 的 font-weight:600，去边框/背景、继承字号，
+   仅以 --primary 着色 + hover 下划线表达「可点击」。焦点环沿用既有 :focus-visible 兜底可达性。
+   备注写入后合并为「名称(备注)」；.room-note-name 用 --muted 小字回显当前正在编辑的房间名，
+   换行用 word-break 兜底长 URL 类名。配色一律取既有 CSS 变量，不新增颜色字面量。 */
+.room-name-btn {
+    display: inline-block;
+    max-width: 100%;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    font-weight: 600;
+    color: var(--primary);
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    vertical-align: middle;
+}
+.room-name-btn:hover { text-decoration: underline; }
+.room-name-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 3px; }
+.room-note-name { color: var(--muted); font-size: 12px; line-height: 1.5; word-break: break-all; }
+
 /* ===== 动效层（web/motion.js 配套，零依赖） =====
    - 滚动入场：.reveal 初始隐藏，进入视口加 .is-revealed 过渡显现；无 JS 时元素默认可见
      （opacity:0 只在 .reveal 被 JS 加上后才生效，脚本失败/禁用也不丢内容）。

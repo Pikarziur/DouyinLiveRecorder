@@ -343,6 +343,10 @@
             'rooms.namePlaceholder': '主播名称（可选）', 'rooms.addBtn': '添加', 'rooms.list': '直播间列表',
             'rooms.empty': '暂无直播间', 'rooms.delete': '删除', 'rooms.enter': '进入', 'rooms.download': '下载',
             'rooms.deleteConfirm': '确认删除该直播间？',
+            'rooms.noteTitle': '编辑直播间备注', 'rooms.noteNameHint': '直播间：{name}',
+            'rooms.notePlaceholder': '输入备注，将显示为「名称(备注)」',
+            'toast.noteUpdated': '已更新备注：{name}', 'toast.noteUpdateFailed': '更新备注失败: ',
+            'toast.noteComma': '备注不能包含逗号（配置行的字段分隔符）',
             'rooms.manageQuality': '画质选项', 'rooms.addQuality': '添加画质',
             'rooms.qualityHint': '画质选项存于 config.ini，WEB 与桌面端画质切换菜单共用；仅内置档位可选（自定义名称不会被录制引擎识别）',
             'rooms.qualityEmpty': '已全部添加', 'rooms.qualityAddBtn': '添加',
@@ -412,6 +416,10 @@
             'rooms.namePlaceholder': 'Streamer name (optional)', 'rooms.addBtn': 'Add', 'rooms.list': 'Room list',
             'rooms.empty': 'No rooms', 'rooms.delete': 'Delete', 'rooms.enter': 'Open', 'rooms.download': 'Download',
             'rooms.deleteConfirm': 'Delete this room?',
+            'rooms.noteTitle': 'Edit room note', 'rooms.noteNameHint': 'Room: {name}',
+            'rooms.notePlaceholder': 'Enter a note, shown as "Name (note)"',
+            'toast.noteUpdated': 'Note updated: {name}', 'toast.noteUpdateFailed': 'Failed to update note: ',
+            'toast.noteComma': 'Note cannot contain a comma (it is the config line separator)',
             'rooms.manageQuality': 'Quality options', 'rooms.addQuality': 'Add quality',
             'rooms.qualityHint': 'Quality options are stored in config.ini and shared with the desktop quality switcher; only built-in tiers can be selected (custom names are not recognised by the recording engine)',
             'rooms.qualityEmpty': 'All added', 'rooms.qualityAddBtn': 'Add',
@@ -478,6 +486,10 @@
             'rooms.namePlaceholder': 'Streamer name (optional)', 'rooms.addBtn': 'Add', 'rooms.list': 'Room list',
             'rooms.empty': 'No rooms', 'rooms.delete': 'Delete', 'rooms.enter': 'Open', 'rooms.download': 'Download',
             'rooms.deleteConfirm': 'Delete this room?',
+            'rooms.noteTitle': 'Edit room note', 'rooms.noteNameHint': 'Room: {name}',
+            'rooms.notePlaceholder': 'Enter a note, shown as "Name (note)"',
+            'toast.noteUpdated': 'Note updated: {name}', 'toast.noteUpdateFailed': 'Failed to update note: ',
+            'toast.noteComma': 'Note cannot contain a comma (it is the config line separator)',
             'rooms.manageQuality': 'Quality options', 'rooms.addQuality': 'Add quality',
             'rooms.qualityHint': 'Quality options are stored in config.ini and shared with the desktop quality switcher; only built-in tiers can be selected (custom names are not recognised by the recording engine)',
             'rooms.qualityEmpty': 'All added', 'rooms.qualityAddBtn': 'Add',
@@ -544,6 +556,10 @@
             'rooms.namePlaceholder': '主播名稱（可選）', 'rooms.addBtn': '新增', 'rooms.list': '直播間列表',
             'rooms.empty': '暫無直播間', 'rooms.delete': '刪除', 'rooms.enter': '進入', 'rooms.download': '下載',
             'rooms.deleteConfirm': '確認刪除該直播間？',
+            'rooms.noteTitle': '編輯直播間備註', 'rooms.noteNameHint': '直播間：{name}',
+            'rooms.notePlaceholder': '輸入備註，將顯示為「名稱(備註)」',
+            'toast.noteUpdated': '已更新備註：{name}', 'toast.noteUpdateFailed': '更新備註失敗: ',
+            'toast.noteComma': '備註不能包含逗號（設定檔列的欄位分隔符）',
             'rooms.manageQuality': '畫質選項', 'rooms.addQuality': '新增畫質',
             'rooms.qualityHint': '畫質選項存於 config.ini，Web 與桌面端畫質切換選單共用；僅內建檔位可選（自訂名稱不會被錄製引擎識別）',
             'rooms.qualityEmpty': '已全部新增', 'rooms.qualityAddBtn': '新增',
@@ -1429,7 +1445,11 @@ tbody.innerHTML = html;
             for (var i = 0; i < rooms.length; i++) {
                 var r = rooms[i];
                 html += '<tr>'
-                    + '<td class="room-name-cell">' + esc(r.name) + getPlatform(r.url) + '</td>'
+                    + '<td class="room-name-cell">'
+                    + '<button type="button" class="room-name-btn" data-action="edit-name"'
+                    + ' data-url="' + esc(r.url) + '" data-quality="' + esc(r.quality || '') + '"'
+                    + ' title="' + esc(t('rooms.noteTitle')) + '">' + esc(r.name) + '</button>'
+                    + getPlatform(r.url) + '</td>'
                     + '<td title="' + esc(r.url) + '">' + esc(r.url) + '</td>'
                     + '<td>' + buildRoomQualitySelect(r.url, r.quality) + '</td>'
                     + '<td><label class="switch"><input type="checkbox"' + (r.enabled ? ' checked' : '')
@@ -1441,6 +1461,77 @@ tbody.innerHTML = html;
 tbody.innerHTML = html;
         } catch (e) {
             tbody.innerHTML = '<tr><td colspan="6" class="empty">' + esc(t('loadFailed')) + '</td></tr>';
+        }
+    }
+
+    // 14a. 直播间备注编辑：房间名点击 → 弹窗填备注 → 合并为「名称(备注)」新名称并落盘。
+    // 当前正在编辑的房间上下文（url 是房间主键，quality 需原样回传以免 PUT 丢画质）。
+    var _noteCtx = { url: '', quality: '' };
+
+    // 把「名称(备注)」拆回 {base, note}：只认整串末尾的 (...)，且备注内不含括号（由本功能生成，恒满足）。
+    function splitRoomNote(fullName) {
+        var s = fullName || '';
+        var m = s.match(/^(.*)\(([^()]*)\)$/);
+        if (m) return { base: m[1], note: m[2] };
+        return { base: s, note: '' };
+    }
+
+    function openRoomNoteModal(url, fullName, quality) {
+        _noteCtx.url = url || '';
+        _noteCtx.quality = quality || '';
+        var note = splitRoomNote(fullName).note;
+        var modal = $('room-note-modal');
+        var nameEl = $('room-note-name');
+        var input = $('room-note-input');
+        if (!modal || !nameEl || !input) return;
+        nameEl.textContent = t('rooms.noteNameHint').replace('{name}', fullName || '');
+        input.value = note;
+        modal.classList.remove('hidden');
+        // 聚焦并选中既有备注，方便直接改写
+        input.focus();
+        if (input.select) input.select();
+    }
+
+    function closeRoomNoteModal() {
+        var modal = $('room-note-modal');
+        if (modal) modal.classList.add('hidden');
+        _noteCtx.url = '';
+        _noteCtx.quality = '';
+    }
+
+    async function saveRoomNote() {
+        var input = $('room-note-input');
+        if (!input) return;
+        var note = input.value.trim();
+        if (note.indexOf(',') >= 0 || note.indexOf('，') >= 0) {
+            toast(t('toast.noteComma'), 'error');
+            return;
+        }
+        // 取回当前行最新名称：弹窗打开后列表可能被刷新，但 _noteCtx 仍持有打开时的 url；
+        // 为拿到 base 名，按 data-url 在已渲染按钮里匹配当前文本，找不到则退回空（base=空）。
+        var btn = null;
+        var allBtns = document.querySelectorAll('button.room-name-btn');
+        for (var bi = 0; bi < allBtns.length; bi++) {
+            if (allBtns[bi].getAttribute('data-url') === _noteCtx.url) { btn = allBtns[bi]; break; }
+        }
+        var current = btn ? btn.textContent : '';
+        var base = splitRoomNote(current).base;
+        var newName = note ? (base + '(' + note + ')') : base;
+        try {
+            await api('/api/rooms', {
+                method: 'PUT',
+                body: {
+                    old_url: _noteCtx.url,
+                    url: _noteCtx.url,
+                    quality: _noteCtx.quality || null,
+                    name: newName,
+                },
+            });
+            closeRoomNoteModal();
+            toast(t('toast.noteUpdated').replace('{name}', newName), 'success');
+            loadRooms();
+        } catch (e) {
+            toast(t('toast.noteUpdateFailed') + (e.message || ''), 'error');
         }
     }
 
@@ -2228,6 +2319,19 @@ tbody.innerHTML = html;
         $('reauth-modal').addEventListener('click', function (e) {
             if (e && e.target && e.target === $('reauth-modal')) _settleReauth('');
         });
+        // 直播间备注窗：保存 / 取消 / Enter 提交 / Esc 取消 / 点遮罩空白取消
+        $('room-note-confirm').addEventListener('click', saveRoomNote);
+        $('room-note-cancel').addEventListener('click', closeRoomNoteModal);
+        $('room-note-input').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter' || e.keyCode === 13) saveRoomNote();
+        });
+        document.addEventListener('keydown', function (e) {
+            if (!_noteCtx.url) return;
+            if (e.key === 'Escape' || e.keyCode === 27) closeRoomNoteModal();
+        });
+        $('room-note-modal').addEventListener('click', function (e) {
+            if (e && e.target && e.target === $('room-note-modal')) closeRoomNoteModal();
+        });
         $('danmaku-room-filter').addEventListener('change', dmRenderStream);
         $('danmaku-clear-btn').addEventListener('click', function () {
             dmMessages = [];
@@ -2247,6 +2351,11 @@ tbody.innerHTML = html;
             var t = e.target.closest && e.target.closest('button[data-action="delete"]');
             if (t) {
                 deleteRoom(t.getAttribute('data-url'));
+                return;
+            }
+            var nb = e.target.closest && e.target.closest('button[data-action="edit-name"]');
+            if (nb) {
+                openRoomNoteModal(nb.getAttribute('data-url'), nb.textContent, nb.getAttribute('data-quality'));
             }
         });
         $('file-breadcrumb').addEventListener('click', function (e) {
