@@ -855,7 +855,7 @@ def read_web_config(config_file: str | Path) -> dict[str, str | int | bool]:
         elif isinstance(default, int):
             try:
                 result[key] = int(raw)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 result[key] = default
         else:
             result[key] = raw
@@ -1273,7 +1273,7 @@ def clamp_pbkdf2_iterations(raw: object) -> int:
     # 无法解析（非数字/为空）→ 返回默认值，由调用方的 compare_digest 自然判失败，不抛异常。
     try:
         value = int(cast("str", raw))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         # 注：需要绑定异常对象时不能省括号（`except A, B as e:` 非法）
         return _PBKDF2_ITERATIONS
     return max(_PBKDF2_ITERATIONS, min(value, _PBKDF2_MAX_ITERATIONS))
