@@ -261,10 +261,13 @@ def main() -> None:
     if not web_cfg["web_show_console"]:
         _enter_background_mode(logs_dir, host, port)
 
-    # Web 模式默认不自动开启录制：录制引擎线程保持运行（配置热加载/调度器就绪），
-    # 但不拉起任何房间线程，由面板「开始录制」按钮经 POST /api/recording/toggle 手动触发。
-    # CLI/GUI 直跑不受影响（recording_enabled 默认 True）
-    main.recording_enabled = False
+    # Web 模式是否随进程启动自动开始录制（2026-10-08 新增，取代原先写死 False 的行为）：
+    # 原实现恒置 False，容器/进程每次重启都要手点面板「开始录制」，无人值守场景下等于白停。
+    # 改成读[Web] web_auto_record，默认 True（贴合「重启即恢复录制」的直觉）；显式写
+    # `web_auto_record = false` 的人为保留旧行为——面板「停止录制」按钮仍可随时切换，
+    # 两者互不干扰（按钮走 POST /api/recording/toggle 改的是运行态变量，不是这个配置项）。
+    # CLI/GUI 直跑不受影响（recording_enabled 默认 True）。
+    main.recording_enabled = cast(bool, web_cfg["web_auto_record"])
     recorder_thread = threading.Thread(
         target=main.main,
         name="recorder-engine",

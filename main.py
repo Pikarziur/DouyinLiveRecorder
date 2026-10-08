@@ -263,7 +263,12 @@ video_save_type: str = "ts"  # 录制视频格式
 split_video_by_time: bool = False  # 是否开启分段录制
 split_time: str = "1800"  # 视频分段时间（秒）
 create_time_file: bool = False  # 是否生成时间字幕文件
-auto_update_anchor_name: bool = True  # 主播名变更时自动同步配置与录制文件（由 main() 读取配置后覆盖）
+# 主播名变更时自动同步配置与录制文件（由main() 读取配置后覆盖）。
+# 2026-10-08 默认改为False：自动同步会用平台返回的平台名整段覆盖 name 字段，
+# 而 name 字段可能已被用户手工并入「备注」（形如 `原名(备注)`），覆盖后备注即丢失。
+# 想要备注能长期留存，就不能让它被平台名定期冲掉，故默认关闭；需要自动同步的用户
+# 在 config.ini 的「录制设置」节显式写 `是否自动更新主播名(是/否) = 是` 即可恢复原行为。
+auto_update_anchor_name: bool = False
 hls_collection_enabled: bool = True  # 是否优先使用 HLS(m3u8) 源采集；关闭时回退 FLV
 # HLS 采集排除平台列表（「HLS采集排除平台(逗号分隔)」，由 main() 读取配置后覆盖）：
 # 命中平台无视「是否启用HLS采集」配置、恒按 FLV 采集（等效于仅对该平台关闭 HLS 采集）
@@ -4896,7 +4901,9 @@ def main(non_interactive: bool = False) -> None:
         folder_by_title = read_config_bool(config, "录制设置", "保存文件夹是否以标题区分", False)
         filename_by_title = read_config_bool(config, "录制设置", "保存文件名是否包含标题", False)
         clean_emoji = read_config_bool(config, "录制设置", "是否去除名称中的表情符号", True)
-        auto_update_anchor_name = read_config_bool(config, "录制设置", "是否自动更新主播名(是/否)", True)
+        # 默认False（同模块级声明的取舍）：自动同步会用平台名整段覆盖 name 字段，
+        # 把用户手工并入的「备注」（`原名(备注)` 形态）冲掉。配置文件显式写「是」才恢复。
+        auto_update_anchor_name = read_config_bool(config, "录制设置", "是否自动更新主播名(是/否)", False)
         video_save_type = read_config_value(config, "录制设置", "视频保存格式ts|mkv|flv|mp4|mp3音频|m4a音频", "ts")
         video_record_quality = read_config_value(config, "录制设置", "原画|超清|高清|标清|流畅", "原画")
         hls_collection_enabled = read_config_bool(config, "录制设置", "是否启用HLS采集(是/否)", True)

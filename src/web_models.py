@@ -61,12 +61,18 @@ def _require_dict(data: Any) -> dict[str, Any]:
 class LoginRequest:
     # POST /api/login。password 明文到达端点后走 PBKDF2 校验与旧哈希升级，本层只保证类型，
     # 绝不把凭据写进任何日志。
+    # username 为可选**字段**（未配置 web_username 的旧部署不该因多一个键而报 400），
+    # 但登录端点在配置了 web_username 时要求它与账号严格相等：字段缺失/留空一律拒绝。
     password: str
+    username: str | None = None
 
     @classmethod
     def parse(cls, data: Any) -> LoginRequest:
         body = _require_dict(data)
-        return cls(password=_as_str(body.get("password"), "password"))
+        return cls(
+            password=_as_str(body.get("password"), "password"),
+            username=_as_opt_str(body.get("username"), "username"),
+        )
 
 
 @dataclass

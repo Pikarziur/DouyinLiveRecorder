@@ -314,7 +314,7 @@
             'tab.dashboard': '仪表盘', 'tab.danmaku': '弹幕监控', 'tab.rooms': '直播间',
             'tab.config': '配置', 'tab.files': '文件', 'logout': '退出',
             'theme.toggle': '切换主题', 'language.select': '语言',
-            'login.title': '登录', 'login.password': '访问密码', 'login.submit': '登录', 'login.failed': '登录失败',
+            'login.title': '登录', 'login.password': '访问密码', 'login.username': '账号', 'login.submit': '登录', 'login.failed': '登录失败',
             'dashboard.engineWarning': '⚠️ 录制引擎已停止运行，请检查日志或重启服务',
             'dashboard.statusUnavailable': '⚠️ 状态数据获取失败，面板数据可能不是最新的（后端错误码 status_unavailable）',
             'dashboard.monitoring': '监测中', 'dashboard.recording': '录制中',
@@ -387,7 +387,7 @@
             'tab.dashboard': 'Dashboard', 'tab.danmaku': 'Danmaku', 'tab.rooms': 'Rooms',
             'tab.config': 'Config', 'tab.files': 'Files', 'logout': 'Logout',
             'theme.toggle': 'Toggle theme', 'language.select': 'Language',
-            'login.title': 'Login', 'login.password': 'Access password', 'login.submit': 'Login', 'login.failed': 'Login failed',
+            'login.title': 'Login', 'login.password': 'Access password', 'login.username': 'Account', 'login.submit': 'Login', 'login.failed': 'Login failed',
             'dashboard.engineWarning': '⚠️ The recording engine has stopped. Check logs or restart the service',
             'dashboard.statusUnavailable': '⚠️ Failed to fetch status data; the panel may be showing stale values (backend error code status_unavailable)',
             'dashboard.monitoring': 'Monitoring', 'dashboard.recording': 'Recording',
@@ -457,7 +457,7 @@
             'tab.dashboard': 'Dashboard', 'tab.danmaku': 'Danmaku', 'tab.rooms': 'Rooms',
             'tab.config': 'Config', 'tab.files': 'Files', 'logout': 'Log out',
             'theme.toggle': 'Toggle theme', 'language.select': 'Language',
-            'login.title': 'Log in', 'login.password': 'Access password', 'login.submit': 'Log in', 'login.failed': 'Log in failed',
+            'login.title': 'Log in', 'login.password': 'Access password', 'login.username': 'Account', 'login.submit': 'Log in', 'login.failed': 'Log in failed',
             'dashboard.engineWarning': '⚠️ The recording engine has stopped. Check logs or restart the service',
             'dashboard.statusUnavailable': '⚠️ Failed to fetch status data; the panel may be showing stale values (backend error code status_unavailable)',
             'dashboard.monitoring': 'Monitoring', 'dashboard.recording': 'Recording',
@@ -527,7 +527,7 @@
             'tab.dashboard': '儀表板', 'tab.danmaku': '彈幕監控', 'tab.rooms': '直播間',
             'tab.config': '設定', 'tab.files': '檔案', 'logout': '登出',
             'theme.toggle': '切換主題', 'language.select': '語言',
-            'login.title': '登入', 'login.password': '存取密碼', 'login.submit': '登入', 'login.failed': '登入失敗',
+            'login.title': '登入', 'login.password': '存取密碼', 'login.username': '帳號', 'login.submit': '登入', 'login.failed': '登入失敗',
             'dashboard.engineWarning': '⚠️ 錄製引擎已停止執行，請檢查日誌或重新啟動服務',
             'dashboard.statusUnavailable': '⚠️ 狀態資料取得失敗，面板資料可能不是最新的（後端錯誤碼 status_unavailable）',
             'dashboard.monitoring': '監測中', 'dashboard.recording': '錄製中',
@@ -752,8 +752,9 @@
     // 浏览器重启持久化**——这是「隐私模式下不抛异常」换来的取舍，别把它当 localStorage 依赖。
     async function doLogin() {
         var pw = $('login-password').value;
+        var uname = $('login-username') ? $('login-username').value : '';
         try {
-            var data = await api('/api/login', { method: 'POST', body: { password: pw } });
+            var data = await api('/api/login', { method: 'POST', body: { username: uname, password: pw } });
             setToken(data.token || '');
             $('login-error').textContent = '';
             // M-22 配套（轻微项 41 的同类形态）：登录成功后口令不再需要，却仍留在 #login-password 里
@@ -761,6 +762,8 @@
             // 失败分支刻意**不清**：口令输错时用户要改一两个字符重登，清空等于逼他重打。
             var pwEl = $('login-password');
             if (pwEl) pwEl.value = '';
+            var unameEl = $('login-username');
+            if (unameEl) unameEl.value = '';
             showView('dashboard');
         } catch (e) {
             $('login-error').textContent = e.message || t('login.failed');
@@ -1957,6 +1960,8 @@ tbody.innerHTML = html;
             //（或被窃）bearer 的一方能把「需要凭据的面板」降级成「本机任意进程可操控的面板」，且该降级在 token
             // 吊销后依然留存。这里补上确认步骤：文案点明后果，未确认即跳过并计入 skippedAuth，末尾单独提示
             // 「已跳过 N 项认证相关改动」（不静默吞掉）。
+            // 2026-10-08 修正：web_username 刻意不在里面——改账号不等于改凭据（登录仍要正确口令），
+            // 钉进复验键集会让「后端先部署、前端后部署」的半部署状态直接把保存打死。
             var isAuthKey = section === 'Web' && (key === 'web_auth_enable' || key === 'web_password');
             if (isAuthKey) {
                 if (!confirm(t('config.authChangeConfirm').replace('{k}', String(key)))) {

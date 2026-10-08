@@ -5,7 +5,6 @@
 #   （录制文件、日志、备份）与本地工具目录；保留源码、编译好的 .mo（gettext 运行时必需）、
 #   StopRecording.vbs 等分发脚本。
 # 运行时资源 config/、ffmpeg/、node/ 与 exe 同级，但 config/*.ini 含凭据信息需忽略。
-# =============================================================================
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -220,14 +219,10 @@ ffmpeg/ffmpeg
 ffmpeg/ffprobe
 
 # 录制的音视频与弹幕产物（视频 .ts/.mp4/.flv 与弹幕 .srt 均落盘于此，禁止入库）
-downloads/
 recordings/
 
-backup_config/
 
 # 日志文件（含 logs/ 目录与根目录散落日志）
-logs/
-*.log
 *.log.*
 # 弹幕监控边车日志（logs/danmaku_monitor.jsonl；与 .dockerignore 同源维护）
 *.jsonl
@@ -250,19 +245,15 @@ desktop.ini
 !StopRecording.vbs
 
 # macOS 特定文件
-.DS_Store
 .AppleDouble
 .LSOverride
 
 # Linux 特定文件
-*~
 
 # 临时文件
 *.tmp
 *.temp
 *.bak
-*.swp
-*.swo
 
 # 过程性探针 / 调试残留（非源码，如 src/stream.pyc_probe_tmp，勿提交）
 *.pyc_probe_tmp
@@ -314,3 +305,11 @@ pytest-cache-files-*/
 _out_*.txt
 _probe_*.py
 patch/
+# N1 部署中间产物（2026-10-08）：从 N1 拉回的原版文件与补丁副本、容器对比目录。
+# 仅供本机比对/回灌参考，**不是仓库源码**；误提交会让仓库凭空多出上万行重复代码。
+web/n1-current/
+web/n1-account-patched/
+web/n1-autorecord/
+web/container-originals/
+web/container-patched/
+n1-extract/

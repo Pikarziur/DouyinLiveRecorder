@@ -225,6 +225,7 @@ from src.web_config import (
     read_quality_options,
     read_web_config,
     update_config_line,
+    WEB_DEFAULTS,
     update_or_append_config_line,
     update_room_quality,
     validate_config_target,
@@ -713,6 +714,21 @@ def create_app(
             # 限制在单次请求内、并不能替缓存补上这次写入。
             _invalidate_web_cfg_cache()
             cfg["web_password"] = hashed
+        # 账号+密码联合加固（2026-10-08）：配置了 web_username 时，登录须账号与密码**同时对上**——
+        # 账号留空、填错一律拒（不降级为「只校验口令」）；未配置 web_username 时只看密码，向后兼容。
+        # 失败文案与口令错误统一为「账号或密码错误」，不给账号枚举留缝。
+        _cfg_username = cast(str, cfg.get("web_username") or "").strip()
+        if _cfg_username:
+            # getattr 兜底仍必需：web_models.py 在镜像层（要 docker cp 才能换），若它还是旧的，
+            # LoginRequest 根本没有 username 属性，写死 req.username 会抛 AttributeError → 登录 500。
+            # 取不到时按空串处理 → 判不等 → 401（是「拒绝」而非「崩溃」）；
+            # 万一真被锁，删掉 config.ini [Web] 段的 web_username 行即可立刻恢复。
+            _req_username = str(getattr(req, "username", "") or "").strip()
+            if _req_username != _cfg_username:
+                with _FAILED_LOGINS_LOCK:
+                    _FAILED_LOGINS.setdefault(client_ip, []).append(time.time())
+                    _GLOBAL_LOGIN_FAILURES.append(time.time())
+                raise HTTPException(401, "账号或密码错误")
         # M-06（2026-09-30）：登录比对统一 strip。写入侧以 strip 后的值哈希（/api/config），
         # reauth 复验也用 strip 后的值（MID-2241）；登录侧若仍用原文，设置时粘贴带出的首尾
         # 空格会重现「能登录、不能 reauth」的口径分叉，进而变成认证配置经面板自锁。
@@ -720,7 +736,7 @@ def create_app(
             with _FAILED_LOGINS_LOCK:
                 _FAILED_LOGINS.setdefault(client_ip, []).append(time.time())
                 _GLOBAL_LOGIN_FAILURES.append(time.time())
-            raise HTTPException(401, "密码错误")
+            raise HTTPException(401, "账号或密码错误")
         # 登录成功：清零该 IP 的失败计数（全局预算不回收——它是「整站口令校验吞吐」的
         # 上限，按成功回收就又给了「拿真实账号登录一次即重置预算」的绕法）
         with _FAILED_LOGINS_LOCK:
@@ -1085,7 +1101,28 @@ def create_app(
     @_route(app, ["GET"], "/api/config")
     def get_config() -> dict[str, dict[str, str]]:
         # MID-34：同步 def（走线程池）——read_config_safe 是全量 configparser 解析。
-        return read_config_safe(cast(str, app.state.config_file))
+        cfg = read_config_safe(cast(str, app.state.config_file))
+        # 账号+密码联合加固（2026-10-08）：web_username 是新加的 [Web] 键，配置文件里未必存在；
+        # get_config 只回显文件内容、不合并 WEB_DEFAULTS，导致配置页看不到该输入框。这里在响应里
+        # 补一个缺省空串，保证页面始终能编辑账号（不配置则留空=仅密码，向后兼容）。
+        web_section = cfg.setdefault("Web", {})
+        if "web_username" not in web_section:
+            web_section["web_username"] = WEB_DEFAULTS.get("web_username", "")
+        # 账号必须排在口令**上面**：配置页是 `for (key in items)` 按响应键序渲染的（app.js loadConfig），
+        # 所以展示顺序完全由这里的返回顺序决定。直接 append 会落到 web_password 后面去。
+        # 首次保存后 update_or_append_config_line 把该行补建在 [Web] 段尾，物理顺序同样在口令之后，
+        # 故这次重排不是一次性兜底、而是每次 get_config 都做的幂等归位。
+        if "web_password" in web_section:
+            _ordered: dict[str, str] = {}
+            for _k, _v in web_section.items():
+                if _k == "web_username":
+                    continue
+                if _k == "web_password":
+                    _ordered["web_username"] = web_section["web_username"]
+                _ordered[_k] = _v
+            web_section.clear()
+            web_section.update(_ordered)
+        return cfg
 
     @_route(app, ["PUT"], "/api/config")
     def update_config(req: ConfigUpdate) -> dict[str, object]:
@@ -1245,6 +1282,10 @@ def create_app(
         # · **口令比对失败不回显任何口令线索**：只回固定 detail，细节走 _log_internal_error。
         # 反向边界（不得扩到的范围）：其余 Web 键（web_host/web_port/web_allowed_hosts…）与其他节的
         # 键一律不受本条影响，否则「改个端口也要复验」会逼人绕过面板手改文件。
+        # 2026-10-08 修正：web_username 不进复验键集。它只是「账号名」，改动后仍需正确口令才能登录，
+        # 不构成权限提升；而把它钉进复验集会让「后端已部署、前端未部署」这种半部署状态直接把
+        # 「保存配置」打死（前端不认这个键就不弹口令窗，后端却 403）。回归到 fork 既有「认证两键」契约
+        # （tests/frontend/test_auth_reauth.mjs 钉的正是这条），键集与前端保持零漂移。
         if is_web_section and key_norm in ("web_auth_enable", "web_password"):
             if current_cfg is None:
                 current_cfg = dict(_read_web_config_cached(cast(str, app.state.config_file)))
@@ -1274,6 +1315,13 @@ def create_app(
 
         with _main.file_update_lock:
             ok = update_config_line(cast(str, app.state.config_file), section, key, value)
+            if not ok and is_web_section:
+                # 2026-10-08：web_username 是后加的 [Web] 键，老 config.ini 里根本没有这一行，
+                # 而 update_config_line 的契约是「缺键/缺节一律 False、不写入」→ 404
+                # 「未找到对应的配置项」，于是配置页显示得出、却永远存不进去。
+                # 走既有 update_or_append_config_line（替换优先、缺键补建，同一 RLock 内两步不交错）
+                # 把这一行补出来。只对 [Web] 放宽：其余节维持「键必须已存在」的 404 契约。
+                ok = update_or_append_config_line(cast(str, app.state.config_file), section, key, value)
         if not ok:
             raise HTTPException(404, "未找到对应的配置项")
         # 密码变更后吊销所有现有 token，强制重新登录

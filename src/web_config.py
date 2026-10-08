@@ -69,7 +69,12 @@ WEB_DEFAULTS: dict[str, str | int | bool] = {
     "web_port": 8000,
     "web_auth_enable": False,
     "web_password": "",
+    "web_username": "",
     "web_token_expiry": 86400,
+    # 2026-10-08：进程/容器启动后是否自动开始录制。原实现恒为 False（web.py 写死），
+    # 导致每次重启都得手点面板「开始录制」，无人值守场景等于白停。默认 True=重启即恢复；
+    # 写false 保留旧行为。面板按钮走运行态变量，与本配置项互不干扰。
+    "web_auto_record": True,
     "web_show_console": True,
     "web_minimize_to_tray": True,
     # 可信代理列表（逗号分隔）：仅当直连对端在列表中才信任 X-Forwarded-For
