@@ -55,6 +55,18 @@ services:
     # 子进程并在退出前 flush 弹幕 SRT，给足 30s 避免录制文件 / 弹幕被截断
     stop_grace_period: 30s
 
+    # DNS（2026-10-08 新增）：写死解析器，绕开宿主 systemd-resolved → 路由器 → mihomo
+    # fake-ip 这条链路。背景：本机 mihomo 以 enhanced-mode: fake-ip 运行（fake-ip-range
+    # 28.0.0.1/8），且 fake-ip-filter 未覆盖 *.douyincdn.com，于是抖音 CDN 走 fake-ip +
+    # DoH 上游解析；mihomo 上游 DoH 短暂失败时，容器内 getent 报
+    # [Errno -3] Temporary failure in name resolution，表现为「录制中途停一段时间又续上」
+    # （main.py 录制结束后 30s 快检机制会让人误以为主播下播）。
+    # 写死后容器自带解析器，与 mihomo 的 DNS 链路解耦；流量仍可能经 mihomo TUN 转发，
+    # 但解析不再依赖它的 DoH。
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+
     # 安全加固：禁止容器进程获取新权限（防御提权）
     security_opt:
       - no-new-privileges:true
